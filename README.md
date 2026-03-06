@@ -10,7 +10,7 @@
 ---
 
 <!-- HERO GIF PLACEHOLDER — record with LICEcap or ShareX and replace below -->
-![IAMD Simulation Demo](./assets/demo.gif)
+![IAMD Simulation Demo](https://cdn.discordapp.com/attachments/692810348650299533/1479459361943326750/brave_3svOIaldBA.gif?ex=69ac1d66&is=69aacbe6&hm=55a3f3878d427758cf51e97a8e6c6147e77821add3bd924f88421c2291d5bec3)
 <!-- Suggested recording: ~20s clip showing a drone swarm wave intercepted + one HGV leaking through -->
 
 ---
@@ -26,7 +26,7 @@
 
 Or clone and open directly:
 ```bash
-git clone https://github.com/YOUR_USERNAME/iamd-sim.git
+git clone https://github.com/definitelynotguru/IAMD-Simulation---Integrated-Air-Missile-Defense.git
 cd iamd-sim
 open index.html   # macOS
 # or just drag index.html into your browser
