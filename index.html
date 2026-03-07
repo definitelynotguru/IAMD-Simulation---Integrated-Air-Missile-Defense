@@ -98,6 +98,17 @@
 //   - [MED-2] prevLOS updated before rMag<0.5 early-return. Eliminates
 //     2-frame LOS-rate spike at terminal approach causing last-instant misses.
 //   - [MED-3] kf.age threshold already correct (isHypersonic?4:2) — no change.
+// CHANGELOG v1.6 — BUG FIXES (auto-fixed 2026-03-07):
+//   - [CRITICAL-1] Screen shake translate() wrapped in push()/pop(): was
+//     accumulating the transform matrix every shake frame → canvas drift.
+//   - [HIGH-2] EW radar detection ellipse clipped to SIM_H: was bleeding
+//     240px below ground into the right-side panel area.
+//   - [HIGH-3] Interceptor aim clamp dead code fixed: `aim < -Math.PI`
+//     (impossible from atan2) replaced with `aim < -Math.PI*0.98`.
+//   - [MEDIUM-2] Kalman predict/update order corrected: kf.predict() now
+//     runs BEFORE radar.update() (standard predict→update Kalman cycle).
+//   - [MEDIUM-4] Screen shake viewport-clipped: right-side panel no longer
+//     shakes (drawingContext.clip to SIM_W before sim drawing).
 // =============================================================================
 
 // ── ALL TUNABLE PARAMETERS LIVE HERE — never scatter magic numbers ────────────
@@ -401,15 +412,26 @@ class EWRadar {
         line(this.x, this.y, tx, ty);
       }
     }
-    // Faint pulsing ring
+    // Faint pulsing ring — also clipped to sim area
     const rPulse = this.rng * (0.4 + 0.4 * abs(sin(this.sweep)));
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(0, 0, CFG.SIM_W, CFG.SIM_H);
+    drawingContext.clip();
     stroke(255, 160, 30, 10);
     strokeWeight(1);
     ellipse(this.x, this.y, rPulse * 2, rPulse * 2);
+    drawingContext.restore();
 
-    // Full detection sphere (not just upper hemisphere — it's elevated)
+    // FIX HIGH-2: EW detection circle clipped to sim area (was bleeding below ground).
+    // Draw the arc only where it stays within [0, SIM_H]. Use canvas clip.
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(0, 0, CFG.SIM_W, CFG.SIM_H);
+    drawingContext.clip();
     stroke(255, 140, 20, 40);
     ellipse(this.x, this.y, this.rng * 2, this.rng * 2);
+    drawingContext.restore();
 
     // EW radar marker: diamond shape (distinct from ground radar triangles)
     fill(255, 160, 30);
@@ -720,16 +742,16 @@ class Interceptor {
     const aimDy = py - y;
     const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy);
     let aim = Math.atan2(aimDy, aimDx);
-    // Clamp: interceptor must launch leftward and upward
-    // Valid range: roughly -PI (hard left) through -PI/2 (straight up) to just barely left of straight up
-    // aim must have negative vy component (upward) and negative or zero vx component (leftward)
-    // That means aim must be between -PI and -PI/2 (third quadrant in screen coords = up-left)
-    // Allow some tolerance: between -PI and -PI*0.15 (almost straight up, slightly right is OK for edge cases)
-    if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
+    // FIX HIGH-3: Clamp interceptor launch angle to valid upward-leftward range.
+    // atan2 returns [-PI, PI] so `aim < -Math.PI` was dead code — replaced with
+    // a symmetric guard that handles both extremes of the valid range.
+    // Valid range: -PI*0.98 (almost hard-left) to -PI*0.15 (nearly straight up).
+    // If outside this range, fall back to direct aim at threat, then to 45deg up-left.
+    if (aim > -Math.PI * 0.15 || aim < -Math.PI * 0.98) {
         // Default to aiming at the threat's current position instead
         aim = Math.atan2(tp.y - y, tp.x - x);
         // If STILL not leftward-upward, force a default ~45deg up-left
-        if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
+        if (aim > -Math.PI * 0.15 || aim < -Math.PI * 0.98) {
             aim = -Math.PI * 0.75; // 135 degrees = up-left at 45deg
         }
     }
@@ -1515,11 +1537,21 @@ function setup() {
 
 function draw() {
   // v2.0: Screen shake on leakage impact
+  // FIX CRITICAL-1 + MEDIUM-4: wrap translate in push()/pop() so it doesn't
+  // accumulate across frames (p5 translate is additive without push/pop).
+  // Also clip shake to sim viewport only — right-side panel must stay stable.
+  background(4, 10, 4); // deep phosphor-green-tinted black
+  push();
   if (screenShake > 0) {
+    // Clip shake translate to sim viewport area only
     translate(random(-3, 3), random(-3, 3));
     screenShake--;
   }
-  background(4, 10, 4); // deep phosphor-green-tinted black
+  // Clip all sim-area drawing to viewport so shake can't bleed into panel
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(0, 0, CFG.SIM_W, CFG.H);
+  drawingContext.clip();
   drawGrid();
 
   // ── Wave spawning timer
@@ -1537,17 +1569,17 @@ function draw() {
   }
   threats = threats.filter(t => t.alive);
 
-  // ── Radar tracking (detect + Kalman predict/update)
-  // FIX: Removed redundant .filter(t => t.alive) — threats already filtered above
-  for (const r of radars) r.update(threats);
-  ewRadar.update(threats); // IMPROVED v1.2: EW radar updates too
-
-  // FIX MED-1: Advance ALL Kalman tracks every frame regardless of detection.
-  // Previously predict() only ran inside detection blocks (~5%/frame for drones),
-  // so covariance didn't grow between detections → ~80-frame engagement delay.
+  // ── Radar tracking (Kalman predict → update, correct order)
+  // FIX MEDIUM-2: kf.predict() must run BEFORE radar.update() each frame.
+  // Standard Kalman cycle: predict (advance state to time k) → update (apply
+  // measurement at time k). Previous order (update then predict) was reversed,
+  // causing velocity estimates to lag one frame behind measurements.
   for (const r of [...radars, ewRadar]) {
     for (const [, kf] of r.tracks) kf.predict();
   }
+  // Now apply measurements at the current (already-predicted) state
+  for (const r of radars) r.update(threats);
+  ewRadar.update(threats); // IMPROVED v1.2: EW radar updates too
 
   // ── C2 interceptor assignment (IMPROVED: adaptive cooldown)
   // Check for hypersonic threats more frequently (every 10 frames ≈ 0.17s)
@@ -1601,6 +1633,8 @@ function draw() {
   drawEngagementLines();
 
   // ── HUD + panel
+  drawingContext.restore(); // end sim-viewport clip (screen shake scope)
+  pop(); // end shake push/pop
   drawPanel();
   if (gameOver) drawGameOver();
 }
