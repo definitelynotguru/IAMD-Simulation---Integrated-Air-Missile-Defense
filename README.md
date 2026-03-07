@@ -11,7 +11,7 @@
 ---
 
 <!-- HERO GIF PLACEHOLDER — record with LICEcap or ShareX and replace below -->
-![IAMD Simulation Demo](https://cdn.discordapp.com/attachments/692810348650299533/1479459361943326750/brave_3svOIaldBA.gif?ex=69ac1d66&is=69aacbe6&hm=55a3f3878d427758cf51e97a8e6c6147e77821add3bd924f88421c2291d5bec3)
+![IAMD Simulation Demo](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNDM1MHNvZHR5NnZsOHgzNjZ3azA1M3Q2cmFzbWxsOGM2amxsNml0aSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/7oXHjHjxaj5FwTj08p/giphy.gif)
 <!-- Suggested recording: ~20s clip showing a drone swarm wave intercepted + one HGV leaking through -->
 
 ---
