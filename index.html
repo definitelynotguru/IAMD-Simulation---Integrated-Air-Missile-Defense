@@ -38,58 +38,19 @@
   </style>
 </head>
 <body>
-<div id="header">◈ INTEGRATED AIR & MISSILE DEFENSE SIMULATION v1.4 ◈</div>
+<div id="header">◈ INTEGRATED AIR & MISSILE DEFENSE SIMULATION v1.0 ◈</div>
 
 <!-- p5.js loaded via CDN — no npm, no build tools required -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
 
 <script>
 // =============================================================================
-// IAMD SIMULATION — Phase 1 Starter (v1.4 — 8 Bug Fixes)
+// IAMD SIMULATION — Phase 1 Starter
 // View: 2D Side View (Range × Altitude range-height display)
 // Threats: Ballistic, Cruise, Hypersonic Glide, Drone Swarm
 // Guidance: Proportional Navigation  →  a_m = N · V_c · (dθ/dt)
 // Tracking: Simplified 2D Kalman Filter on noisy radar returns
-// =============================================================================
-// CHANGELOG v1.1:
-//   - HGV RCS increased 0.08 → 0.15 (detectable at medium range)
-//   - Added fast-interceptor (THAAD-class) for hypersonic threats (spd 10.5)
-//   - C2 prioritizes fast movers with early engagement & reduced cooldown
-//   - HGV target kill rate balanced to ~40-60% (hard but not invincible)
-// CHANGELOG v1.2 — ROOT CAUSE FIX:
-//   - BUG: HGVs entered at y=123px, ground radars at y=560px → slant range
-//     437px > radar max 290px. Detection probability was ZERO, not just low.
-//   - Added elevated Early-Warning (EW) radar at mid-altitude (range 500px)
-//   - Lowered HGV entry altitude (0.22 → 0.38 of SIM_H)
-//   - Steeper HGV glide slope (vy 0.7 → 1.2, gravity 0.005 → 0.008)
-//   - Stronger evasive wobble (0.04-0.14 → 0.3-0.8) to compensate
-//   - EW radar feeds tracks into C2 for early interceptor launch
-// CHANGELOG v1.4 — 8 BUG FIXES:
-//   1. Kalman covariance order-of-operations: save Pxv before mutation to fix
-//      velocity variance update dependency bug.
-//   2. Interceptor lifetime cap: INT_MAX_AGE=300 prevents missed interceptors
-//      from flying forever and accumulating in memory.
-//   3. Leakage dead zone: threats now leak at battery position (87% SIM_W)
-//      instead of SIM_W-3, which was past the self-kill boundary.
-//   4. Swept-volume collision: use dedicated prevX/prevY fields instead of
-//      trail (which stored pre-movement position, not previous frame position).
-//   5. C2 double-launch prevention: add newly-assigned tracks to engaged set
-//      within the same runC2() cycle to prevent duplicate interceptor launches.
-//   6. Collision double-kill: break inner loop after intercept so a dead threat
-//      can't be matched by another interceptor in the same frame.
-//   7. Ballistic missile trajectory: lower peak altitude (0.55→0.40) and boost
-//      horizontal speed (×1.2) so ballistic missiles actually reach defended zone.
-//   8. Render order: re-filter dead objects after checkCollisions() and before
-//      drawing, so killed threats/interceptors don't render for one extra frame.
-// CHANGELOG v1.3 — ENGAGEMENT GEOMETRY FIX:
-//   - BUG: Interceptors launched with vx=0, vy=-speed (straight up) from x=730.
-//     PN guidance couldn't build LOS rate fast enough → zero intercepts.
-//   - Interceptors now launch TOWARD predicted intercept point (lead calculation).
-//     PN guidance refines the trajectory after initial aim.
-//   - Kill radius increased 16 → 24px to prevent fast-closing overshoot.
-//   - Added swept-volume collision check (line-segment closest-point test).
-//   - Gravity increased 0.009 → 0.025 for visible parabolic ballistic arcs.
-//   - Track crosshairs enlarged (14px → 24px) with pulsing animation.
+// Author: [Your Name]  |  github.com/[username]
 // =============================================================================
 
 // ── ALL TUNABLE PARAMETERS LIVE HERE — never scatter magic numbers ────────────
@@ -101,37 +62,20 @@ const CFG = {
   RANGE_KM: 500, ALT_KM: 80,
 
   // Physics
-  GRAVITY_PX: 0.025,      // IMPROVED v1.3: stronger gravity for visible parabolic arcs (was 0.009)
+  GRAVITY_PX: 0.009,      // px/frame²  (scaled from 9.81 m/s² for gameplay)
 
   // Radar — detection probability model:
   // P_detect = 1 / (1 + (R/R_max)^4) × (σ/σ_nom)
-  RADAR_RANGE_PX: 290,    // maximum detection range in sim-pixels — ground radars
+  RADAR_RANGE_PX: 290,    // maximum detection range in sim-pixels
   RADAR_SIGMA_NOM: 1.0,   // reference RCS value (m²) for probability calc
-
-  // IMPROVED v1.2: Elevated early-warning radar for high-altitude threats
-  // Ground radars can't see HGVs at 60km altitude (slant range ~437px > 290px max).
-  // This simulates an elevated/airborne early-warning sensor (like AN/TPY-2 in
-  // forward-deployed mode or an airborne radar on a high-altitude platform).
-  EW_RADAR_RANGE_PX: 500,     // much longer detection range (early warning)
-  EW_RADAR_ALT_FRAC: 0.50,    // placed at mid-altitude (simulates elevated platform)
-  EW_RADAR_X_FRAC: 0.50,      // centered downrange
-  EW_RADAR_SIGMA_NOM: 1.0,    // same RCS normalization
   KALMAN_Q: 0.03,         // process noise covariance (model uncertainty)
   KALMAN_R: 9.0,          // measurement noise covariance (radar error)
 
   // Interceptors — Proportional Navigation constants
   PN_N: 4,                // navigation constant (3–5 typical; 4 = standard military)
-  INT_SPEED: 7.5,         // px/frame (≈ Mach 4–5 scaled) — standard PAC-3 class
+  INT_SPEED: 7.5,         // px/frame (≈ Mach 4–5 scaled)
   INT_MAX_ACCEL: 1.3,     // px/frame² maneuver limit
-
-  // IMPROVED: Fast interceptor for hypersonic threats (THAAD-class)
-  FAST_INT_SPEED: 10.5,       // px/frame (≈ Mach 8 scaled) — fast enough to catch HGVs
-  FAST_INT_MAX_ACCEL: 1.0,    // slightly less agile (heavier booster) but faster
-  FAST_INT_PN_N: 5,           // more aggressive PN constant for fast-closing engagements
-  HYPERSONIC_SPD_THRESH: 5.5, // speed threshold to classify as "hypersonic" for C2
-
-  KILL_RADIUS: 24,        // IMPROVED v1.3: larger proximity fuze (was 16) to prevent fast-closing overshoot        // px proximity fuze radius (≈ 400 m scaled)
-  INT_MAX_AGE: 300,       // interceptor self-destructs after 300 frames (~5s) if no hit
+  KILL_RADIUS: 16,        // px proximity fuze radius (≈ 400 m scaled)
 
   // Threat speeds (px/frame — faster = harder to intercept)
   SPD_BALLISTIC:  3.2,    // Mach ~3 (terminal descent leg)
@@ -151,11 +95,8 @@ const CFG = {
   // Interceptor battery position (right side, protected zone)
   BATT_X_FRAC: 0.87,
 
-  // IMPROVED: C2 engagement timing
-  C2_STD_COOLDOWN: 30,        // frames between C2 checks for standard threats
-  C2_FAST_COOLDOWN: 10,       // frames between C2 checks for hypersonic (shoot early!)
-  C2_ENGAGE_RANGE_FRAC: 0.25, // standard: engage after 25% of range crossed
-  C2_EARLY_ENGAGE_FRAC: 0.12, // hypersonic: engage much earlier (12% range crossed)
+  // Interceptor max age (frames) before self-destruct
+  INT_MAX_AGE: 400,
 };
 
 // ── WORLD ↔ CANVAS COORDINATE TRANSFORMS ─────────────────────────────────────
@@ -204,22 +145,19 @@ class KF1D {
     this.pos += Kp * inn;
     this.vel += Kv * inn;
     // Covariance update: P = (I − K·H)·P
-    const oldPxv = this.Pxv;
     this.Pp  -= Kp * this.Pp;
     this.Pxv -= Kp * this.Pxv;
-    this.Pv  -= Kv * oldPxv;    // FIX v1.4: use pre-mutation Pxv value
+    this.Pv  -= Kv * this.Pxv;
   }
 }
 
 // Pair of 1D Kalman filters gives 2D position+velocity tracking
 class KalmanTrack {
-  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); this.age = 0; }
-  predict()        { this.kx.predict(); this.ky.predict(); this.age++; }
+  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); }
+  predict()        { this.kx.predict(); this.ky.predict(); }
   update(x, y)     { this.kx.update(x); this.ky.update(y); }
   get pos()        { return { x: this.kx.pos, y: this.ky.pos }; }
   get vel()        { return { x: this.kx.vel, y: this.ky.vel }; }
-  // IMPROVED: estimated speed magnitude (used by C2 for threat classification)
-  get speed()      { return sqrt(this.kx.vel * this.kx.vel + this.ky.vel * this.ky.vel); }
 }
 
 // ── RADAR STATION ─────────────────────────────────────────────────────────────
@@ -294,77 +232,6 @@ class Radar {
   }
 }
 
-// ── EARLY-WARNING RADAR (ELEVATED PLATFORM) ──────────────────────────────────
-// IMPROVED v1.2: Ground radars at y=560 can't see HGVs at y=123 (slant range
-// ~437px > 290px max range). This elevated EW radar sits at mid-altitude,
-// simulating an airborne platform (E-2 Hawkeye) or forward-deployed AN/TPY-2.
-// It feeds tracks into the same C2 system so interceptors can launch early.
-class EWRadar {
-  constructor() {
-    this.x    = CFG.EW_RADAR_X_FRAC * CFG.SIM_W;
-    this.y    = CFG.SIM_H * (1 - CFG.EW_RADAR_ALT_FRAC); // elevated position
-    this.rng  = CFG.EW_RADAR_RANGE_PX;
-    this.tracks = new Map();
-    this.sweep  = random(TWO_PI);
-    this.id     = 'EW';
-  }
-
-  detectProb(t) {
-    const dx = t.x - this.x, dy = t.y - this.y;
-    const R  = sqrt(dx*dx + dy*dy);
-    if (R > this.rng) return 0;
-    const rangeFactor = 1 / (1 + pow(R / this.rng, 4));
-    const rcsFactor   = t.rcs / CFG.EW_RADAR_SIGMA_NOM;
-    return rangeFactor * rcsFactor;
-  }
-
-  update(threats) {
-    this.sweep += 0.015;
-    for (const t of threats) {
-      if (!t.alive) { this.tracks.delete(t.id); continue; }
-      const p = this.detectProb(t);
-      if (random() < p) {
-        const mx = t.x + randomGaussian(0, 6); // slightly noisier than ground radar
-        const my = t.y + randomGaussian(0, 6);
-        if (!this.tracks.has(t.id)) {
-          this.tracks.set(t.id, new KalmanTrack(mx, my));
-        } else {
-          const kf = this.tracks.get(t.id);
-          kf.predict();
-          kf.update(mx, my);
-        }
-      }
-    }
-  }
-
-  draw() {
-    push();
-    // EW radar range ring — larger, orange-tinted
-    const r = this.rng * (0.4 + 0.4 * abs(sin(this.sweep)));
-    noFill();
-    stroke(255, 160, 30, 20);
-    strokeWeight(1);
-    ellipse(this.x, this.y, r * 2, r * 2);
-
-    // Full detection sphere (not just upper hemisphere — it's elevated)
-    stroke(255, 140, 20, 40);
-    ellipse(this.x, this.y, this.rng * 2, this.rng * 2);
-
-    // EW radar marker: diamond shape (distinct from ground radar triangles)
-    fill(255, 160, 30);
-    noStroke();
-    quad(this.x, this.y - 10, this.x + 7, this.y, this.x, this.y + 10, this.x - 7, this.y);
-
-    // Label
-    fill(255, 140, 20);
-    noStroke();
-    textSize(7);
-    textAlign(CENTER);
-    text('EW-1', this.x, this.y + 18);
-    pop();
-  }
-}
-
 // ── THREAT BASE CLASS ─────────────────────────────────────────────────────────
 let _tid = 0; // global threat ID counter
 
@@ -415,9 +282,8 @@ class BallisticMissile extends Threat {
     this.vx = CFG.SPD_BALLISTIC;
     // vy needed to reach peak altitude ≈ 55% of SIM_H from ground.
     // Kinematics: vy₀ = -sqrt(2·g·h_peak)  (negative = upward on canvas)
-    const peakPx = CFG.SIM_H * 0.40;  // FIX v1.4: flatter trajectory reaches further downrange (was 0.55)
+    const peakPx = CFG.SIM_H * 0.55;
     this.vy = -sqrt(2 * CFG.GRAVITY_PX * peakPx);
-    this.vx = CFG.SPD_BALLISTIC * 1.2;  // FIX v1.4: slightly faster horizontal to reach defended zone
   }
   update() {
     this.saveTrail();
@@ -472,36 +338,23 @@ class CruiseMissile extends Threat {
 }
 
 // ── HYPERSONIC GLIDE VEHICLE ──────────────────────────────────────────────────
-// IMPROVED v1.1: RCS raised from 0.08 to 0.15 — still very stealthy
-// (ballistic=0.9, cruise=0.4, HGV=0.15, drone=0.05) but now detectable
-// at medium range so the kill chain has a fighting chance.
-//
+// High speed, shallow glide path, slight maneuverability — defeats standard PN.
+// Speed makes it extremely difficult to intercept with conventional SAMs.
 // Real HGVs (DF-17, Avangard): Mach 5–10, pull-up/skip-glide maneuver.
-// Speed makes it extremely difficult to intercept with conventional SAMs,
-// but THAAD-class fast interceptors can now engage them.
 class HypersonicGlide extends Threat {
   constructor() {
-    super('HYPERSONIC', 0.15); // IMPROVED: was 0.08, now 0.15 — stealthy but detectable
+    super('HYPERSONIC', 0.6); // moderate RCS but very high closure speed
     this.x  = -10;
-    // IMPROVED v1.2: Lower entry altitude so HGV enters radar envelope sooner.
-    // Was 0.22 (123px from top = 437px above ground radars = ABOVE radar ceiling).
-    // Now 0.38 (~213px from top = 347px above ground). Combined with EW radar
-    // and steeper glide, the kill chain can actually start in time.
-    this.y  = CFG.SIM_H * 0.38;
+    this.y  = CFG.SIM_H * 0.22; // enters at ~60 km altitude equivalent
     this.vx = CFG.SPD_HYPERSONIC;
-    // IMPROVED v1.2: Steeper glide slope (was 0.7, now 1.2) — descends into
-    // radar coverage faster while still being a challenging high-speed target.
-    this.vy = 1.2;
+    this.vy = 0.7;              // shallow downward glide slope
     this.wobPhase = random(TWO_PI);
-    // IMPROVED v1.2: Stronger evasive wobble (was 0.04-0.14, now 0.3-0.8)
-    // Makes the HGV harder to intercept once detected — compensates for
-    // being more detectable. Real HGVs maneuver aggressively in terminal phase.
-    this.wobAmp   = random(0.3, 0.8);
+    this.wobAmp   = random(0.04, 0.14); // terminal evasive maneuver amplitude
   }
   update() {
     this.saveTrail();
     this.wobPhase += 0.09;
-    this.vy += 0.008; // IMPROVED: stronger gravity pull accelerates descent
+    this.vy += 0.005; // gentle gravity pull into descent
     // Lateral (vertical on screen) wobble simulates skip-glide maneuver
     this.y  += this.vy + sin(this.wobPhase) * this.wobAmp;
     this.x  += this.vx;
@@ -584,67 +437,19 @@ class Drone extends Threat {
 // Physical intuition: if LOS isn't rotating (dθ/dt = 0), both objects
 // are on a collision course — missile already aimed correctly. If LOS
 // is rotating, steer to cancel that rotation.
-//
-// IMPROVED v1.1: Now supports two modes — standard (PAC-3 class) and
-// fast (THAAD class) for hypersonic threat engagement.
 class Interceptor {
-  constructor(x, y, track, isFast = false) {
+  constructor(x, y, track) {
     this.x     = x; this.y = y;
     this.track = track;          // KalmanTrack to pursue (C2-assigned)
-    this.isFast = isFast;        // IMPROVED: fast interceptor flag
-
-    // IMPROVED: select speed/agility based on interceptor type
-    this.speed    = isFast ? CFG.FAST_INT_SPEED : CFG.INT_SPEED;
-    this.maxAccel = isFast ? CFG.FAST_INT_MAX_ACCEL : CFG.INT_MAX_ACCEL;
-    this.navConst = isFast ? CFG.FAST_INT_PN_N : CFG.PN_N;
-
-    // IMPROVED v1.3: Launch TOWARD the predicted intercept point instead of straight up.
-    // Estimate where the target will be in ~T frames (simple lead calculation).
-    const tp = track.pos;
-    const tv = track.vel;
-    const dx = tp.x - x;
-    const dy = tp.y - y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    // Estimate time-to-intercept: distance / interceptor speed
-    const tEst = dist / this.speed;
-    // Predicted intercept point (linear extrapolation of target motion)
-    const px = tp.x + tv.x * tEst * 0.6; // 0.6 damping — don't fully lead, let PN correct
-    const py = tp.y + tv.y * tEst * 0.6;
-    // Aim vector from launch point to predicted intercept
-    const aimDx = px - x;
-    const aimDy = py - y;
-    const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy);
-    let aim = Math.atan2(aimDy, aimDx);
-    // Clamp: interceptor must launch leftward and upward
-    // Valid range: roughly -PI (hard left) through -PI/2 (straight up) to just barely left of straight up
-    // aim must have negative vy component (upward) and negative or zero vx component (leftward)
-    // That means aim must be between -PI and -PI/2 (third quadrant in screen coords = up-left)
-    // Allow some tolerance: between -PI and -PI*0.15 (almost straight up, slightly right is OK for edge cases)
-    if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
-        // Default to aiming at the threat's current position instead
-        aim = Math.atan2(tp.y - y, tp.x - x);
-        // If STILL not leftward-upward, force a default ~45deg up-left
-        if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
-            aim = -Math.PI * 0.75; // 135 degrees = up-left at 45deg
-        }
-    }
-    if (aimDist > 0.1) {
-      this.vx = Math.cos(aim) * this.speed;
-      this.vy = Math.sin(aim) * this.speed;
-    } else {
-      this.vx = 0;
-      this.vy = -this.speed;
-    }
+    this.vx    = 0;
+    this.vy    = -CFG.INT_SPEED; // initially launch straight up
     this.alive = true;
-    this.prevX = x;
-    this.prevY = y;
     this.prevLOS = null;          // needed to compute dθ/dt numerically
     this.trail = [];
     this.age   = 0;
   }
   update() {
     this.age++;
-    if (this.age > CFG.INT_MAX_AGE) { this.alive = false; return; }
     this.trail.push({ x: this.x, y: this.y });
     if (this.trail.length > 28) this.trail.shift();
 
@@ -677,9 +482,8 @@ class Interceptor {
     const Vc = -(relVx * losUx + relVy * losUy);
 
     // PN command: a_m = N · V_c · dθ/dt  (perpendicular to LOS)
-    // IMPROVED: use per-interceptor navConst and maxAccel
-    const aMag  = this.navConst * max(Vc, 0.5) * losRate;
-    const aCmd  = constrain(aMag, -this.maxAccel, this.maxAccel);
+    const aMag  = CFG.PN_N * max(Vc, 0.5) * losRate;
+    const aCmd  = constrain(aMag, -CFG.INT_MAX_ACCEL, CFG.INT_MAX_ACCEL);
 
     // Perpendicular to LOS: rotate LOS unit 90°
     this.vx += aCmd * (-losUy);
@@ -688,139 +492,187 @@ class Interceptor {
     // Maintain constant speed (SAMs use rocket boost, not coasting)
     const spd = sqrt(this.vx*this.vx + this.vy*this.vy);
     if (spd > 0.01) {
-      this.vx = (this.vx/spd) * this.speed;
-      this.vy = (this.vy/spd) * this.speed;
+      this.vx = (this.vx/spd) * CFG.INT_SPEED;
+      this.vy = (this.vy/spd) * CFG.INT_SPEED;
     }
-    this.prevX = this.x;
-    this.prevY = this.y;
     this.x += this.vx; this.y += this.vy;
 
+    // Self-destruct if exceeded max flight time
+    if (this.age > CFG.INT_MAX_AGE) {
+      boom(this.x, this.y, 'DEFAULT', 'small');
+      this.alive = false;
+      return;
+    }
+
     // Kill if out of sim bounds (missed)
-    if (this.x<-30||this.x>CFG.SIM_W+30||this.y<-60||this.y>CFG.SIM_H+20) this.alive=false;
+    if (this.x<-30||this.x>CFG.SIM_W+30||this.y<-60||this.y>CFG.SIM_H+20) {
+      boom(this.x, this.y, 'DEFAULT', 'small');
+      this.alive = false;
+    }
   }
   draw() {
     noFill();
-    // IMPROVED: fast interceptors have bright cyan/white trail, standard are blue
     for (let i=1; i<this.trail.length; i++) {
-      if (this.isFast) {
-        stroke(0, 255, 255, map(i, 0, this.trail.length, 0, 230));
-      } else {
-        stroke(0, 180, 255, map(i, 0, this.trail.length, 0, 210));
-      }
-      strokeWeight(this.isFast ? 1.5 : 1);
+      stroke(0, 180, 255, map(i, 0, this.trail.length, 0, 210));
+      strokeWeight(1);
       line(this.trail[i-1].x, this.trail[i-1].y, this.trail[i].x, this.trail[i].y);
     }
     push();
     translate(this.x, this.y);
     rotate(atan2(this.vy, this.vx));
-    // IMPROVED: fast interceptor is bright cyan/white, larger shape; standard is blue
-    if (this.isFast) {
-      fill(0, 255, 255);
-      noStroke();
-      triangle(-6, -3, -6, 3, 10, 0); // slightly larger
-      // Bright engine glow for fast interceptor
-      fill(255, 255, 255, 140);
-      ellipse(-7, 0, 4, 3);
-    } else {
-      fill(0, 210, 255);
-      noStroke();
-      triangle(-5, -2.5, -5, 2.5, 8, 0);
-    }
+    fill(0, 210, 255);
+    noStroke();
+    triangle(-5, -2.5, -5, 2.5, 8, 0);
     pop();
   }
 }
 
-// ── PARTICLE SYSTEM ───────────────────────────────────────────────────────────
+// ── MULTI-LAYER PARTICLE EXPLOSION SYSTEM (v2.0) ─────────────────────────────
 class Particle {
-  constructor(x, y, r, g, b) {
-    this.x=x; this.y=y;
-    this.vx=random(-4,4); this.vy=random(-4,4);
-    this.life=1.0; this.decay=random(0.018,0.055);
-    this.r=r; this.g=g; this.b=b;
-    this.sz=random(2,7);
+  constructor(x, y, r, g, b, opts = {}) {
+    this.x = x; this.y = y;
+    const spd = opts.speed || random(1, 5);
+    const ang = opts.angle !== undefined ? opts.angle : random(TWO_PI);
+    this.vx = cos(ang) * spd;
+    this.vy = sin(ang) * spd;
+    this.life = 1.0;
+    this.decay = opts.decay || random(0.018, 0.055);
+    this.r = r; this.g = g; this.b = b;
+    this.sz = opts.size || random(2, 7);
+    this.grav = opts.gravity || 0;
+    this.drag = opts.drag || 0.91;
   }
-  update() { this.x+=this.vx; this.y+=this.vy; this.vx*=0.91; this.vy*=0.91; this.life-=this.decay; }
-  draw()   { noStroke(); fill(this.r,this.g,this.b,this.life*255); ellipse(this.x,this.y,this.sz*this.life,this.sz*this.life); }
+  update() {
+    this.x += this.vx; this.y += this.vy;
+    this.vx *= this.drag; this.vy *= this.drag;
+    this.vy += this.grav;
+    this.life -= this.decay;
+  }
+  draw() {
+    noStroke();
+    fill(this.r, this.g, this.b, this.life * 255);
+    ellipse(this.x, this.y, this.sz * this.life, this.sz * this.life);
+  }
   get dead() { return this.life <= 0; }
 }
 
-function boom(x, y, r=255, g=160, b=40, n=28) {
-  for (let i=0; i<n; i++) particles.push(new Particle(x, y, r, g, b));
+// Shockwave ring — expanding circle that fades out
+class ShockwaveRing {
+  constructor(x, y, r, g, b, maxRadius = 40) {
+    this.x = x; this.y = y;
+    this.r = r; this.g = g; this.b = b;
+    this.radius = 5;
+    this.maxRadius = maxRadius;
+    this.life = 1.0;
+    this.expandRate = maxRadius / 20; // reaches max in ~20 frames
+  }
+  update() {
+    this.radius += this.expandRate;
+    this.life = max(0, 1 - this.radius / this.maxRadius);
+  }
+  draw() {
+    noFill();
+    stroke(this.r, this.g, this.b, this.life * 150);
+    strokeWeight(max(0.5, 2 * this.life));
+    ellipse(this.x, this.y, this.radius * 2, this.radius * 2);
+  }
+  get dead() { return this.life <= 0; }
+}
+
+// Screen shake state
+let screenShake = { intensity: 0, frames: 0 };
+
+// Explosion color palettes per threat type
+const EXPLOSION_COLORS = {
+  BALLISTIC:  { core: [255, 220, 200], mid: [255, 80, 60],  spark: [180, 40, 30]  },
+  CRUISE:     { core: [255, 240, 200], mid: [255, 180, 40],  spark: [200, 130, 20] },
+  HYPERSONIC: { core: [220, 200, 255], mid: [180, 80, 255],  spark: [130, 50, 200] },
+  DRONE:      { core: [220, 255, 240], mid: [60, 255, 180],  spark: [40, 180, 120] },
+  DEFAULT:    { core: [255, 255, 255], mid: [255, 160, 40],  spark: [200, 100, 20] }
+};
+
+// Multi-layer explosion: core flash + mid ring + outer sparks + shockwave
+function boom(x, y, threatType = 'DEFAULT', size = 'medium') {
+  const palette = EXPLOSION_COLORS[threatType] || EXPLOSION_COLORS.DEFAULT;
+  const scale = size === 'small' ? 0.4 : size === 'large' ? 1.6 : 1.0;
+  const count = Math.round((size === 'small' ? 8 : size === 'large' ? 40 : 22) * scale);
+
+  // Layer 1: Inner core flash (bright white/light, fast fade, small)
+  const coreCount = Math.round(count * 0.25);
+  for (let i = 0; i < coreCount; i++) {
+    particles.push(new Particle(x, y, palette.core[0], palette.core[1], palette.core[2], {
+      speed: random(1, 3) * scale,
+      decay: random(0.06, 0.12),
+      size: random(3, 6) * scale,
+      drag: 0.85
+    }));
+  }
+
+  // Layer 2: Mid ring (threat-colored, medium fade, outward expansion)
+  const midCount = Math.round(count * 0.45);
+  for (let i = 0; i < midCount; i++) {
+    particles.push(new Particle(x, y, palette.mid[0], palette.mid[1], palette.mid[2], {
+      speed: random(2, 5) * scale,
+      decay: random(0.025, 0.05),
+      size: random(3, 8) * scale,
+      drag: 0.9
+    }));
+  }
+
+  // Layer 3: Outer sparks (dimmer, slower, drift with slight gravity)
+  const sparkCount = Math.round(count * 0.3);
+  for (let i = 0; i < sparkCount; i++) {
+    particles.push(new Particle(x, y, palette.spark[0], palette.spark[1], palette.spark[2], {
+      speed: random(1.5, 6) * scale,
+      decay: random(0.012, 0.035),
+      size: random(1.5, 4) * scale,
+      gravity: 0.04,
+      drag: 0.94
+    }));
+  }
+
+  // Shockwave ring
+  const ringSize = size === 'small' ? 20 : size === 'large' ? 60 : 40;
+  shockwaves.push(new ShockwaveRing(x, y, palette.mid[0], palette.mid[1], palette.mid[2], ringSize));
+}
+
+// Leakage impact — large explosion + screen shake
+function boomLeakage(x, y) {
+  boom(x, y, 'DEFAULT', 'large');
+  screenShake = { intensity: 3, frames: 8 };
 }
 
 // ── GAME STATE ────────────────────────────────────────────────────────────────
-let threats, interceptors, particles, radars, ewRadar;
+let threats, interceptors, particles, shockwaves, radars;
 let score, lastWave, gameOver, log;
-// IMPROVED: track last C2 run frame for adaptive cooldown
-let lastC2Frame = 0;
 
-// ── C2 — COMMAND & CONTROL (PRIORITY-BASED INTERCEPTOR ASSIGNMENT) ───────────
-// IMPROVED v1.1: Complete rewrite for HGV balance.
-// Strategy:
-//   1. Merge all radar tracks into a single threat picture
-//   2. Classify each track by estimated speed (hypersonic vs standard)
-//   3. Prioritize fast movers — engage them FIRST and EARLIER (lower range threshold)
-//   4. Launch fast interceptors (THAAD-class) for hypersonic tracks
-//   5. Launch standard interceptors (PAC-3 class) for everything else
-//   6. Adaptive cooldown: check for fast movers more frequently
+// ── C2 — COMMAND & CONTROL (GREEDY INTERCEPTOR ASSIGNMENT) ───────────────────
+// Strategy: for every confirmed radar track not yet engaged, launch one interceptor.
+// "Greedy" = prioritize closest confirmed threats; not optimal but realistic for Phase 1.
+// Phase 2 will add auction-based assignment to handle saturation attacks.
 function runC2() {
-  // Merge tracks from all radars (ground + EW) into a single threat→KF map
+  // Merge tracks from all radars into a single threat→KF map
   const allTracks = new Map(); // threatId → KalmanTrack
   for (const r of radars) {
     for (const [id, kf] of r.tracks) {
       if (!allTracks.has(id)) allTracks.set(id, kf);
     }
   }
-  // IMPROVED v1.2: also merge EW radar tracks (critical for high-altitude HGVs)
-  for (const [id, kf] of ewRadar.tracks) {
-    if (!allTracks.has(id)) allTracks.set(id, kf);
-  }
   // Collect KF objects already being chased by active interceptors
   const engaged = new Set(interceptors.filter(i => i.alive).map(i => i.track));
 
-  // IMPROVED: Build prioritized list — fast movers first
-  const candidates = [];
   for (const [id, kf] of allTracks) {
     const threat = threats.find(t => t.id === id && t.alive);
     if (!threat) continue;
     if (engaged.has(kf)) continue;
+    // Only engage threats that have crossed 25% of the range (confirmed inbound)
+    if (kf.pos.x < CFG.SIM_W * 0.25) continue;
 
-    // Estimate track speed from Kalman velocity
-    const estSpeed = kf.speed;
-    const isHypersonic = estSpeed > CFG.HYPERSONIC_SPD_THRESH;
-
-    // IMPROVED: Different engagement range thresholds
-    // Hypersonic: engage as soon as 12% range crossed (early cueing)
-    // Standard: engage after 25% range crossed (confirmed inbound)
-    const engageThresh = isHypersonic ? CFG.C2_EARLY_ENGAGE_FRAC : CFG.C2_ENGAGE_RANGE_FRAC;
-    if (kf.pos.x < CFG.SIM_W * engageThresh) continue;
-    if (kf.pos.x > CFG.BATT_X_FRAC * CFG.SIM_W) continue; // threat already past battery, don't waste interceptor
-    if (kf.age < 4) continue; // wait for Kalman velocity to stabilize
-
-    candidates.push({ id, kf, threat, estSpeed, isHypersonic });
-  }
-
-  // Sort: hypersonic first, then by how far they've penetrated (higher x = more urgent)
-  candidates.sort((a, b) => {
-    // Hypersonic always before non-hypersonic
-    if (a.isHypersonic && !b.isHypersonic) return -1;
-    if (!a.isHypersonic && b.isHypersonic) return 1;
-    // Among same priority: further right (closer to defended zone) = more urgent
-    return b.kf.pos.x - a.kf.pos.x;
-  });
-
-  // Launch interceptors for each candidate
-  const lx = CFG.BATT_X_FRAC * CFG.SIM_W;
-  for (const c of candidates) {
-    const isFast = c.isHypersonic;
-    interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, c.kf, isFast));
-    engaged.add(c.kf);  // prevent duplicate launches this cycle
+    // Launch from interceptor battery
+    const lx = CFG.BATT_X_FRAC * CFG.SIM_W;
+    interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, kf));
     score.shots++;
-    if (isFast) {
-      addLog(`C2 ▶ FAST INT LAUNCHED [${c.threat.type}] SPD:${c.estSpeed.toFixed(1)}`);
-    } else {
-      addLog(`C2 ▶ INTERCEPTOR LAUNCHED [${c.threat.type}]`);
-    }
+    addLog(`C2 ▶ INTERCEPTOR LAUNCHED [${threat.type}]`);
   }
 }
 
@@ -861,49 +713,21 @@ function checkCollisions() {
     if (!inter.alive) continue;
     for (const t of threats) {
       if (!t.alive) continue;
-      // IMPROVED v1.3: Swept-volume proximity check — prevents fast interceptors
-      // from "tunneling" past threats between frames. Check closest point on
-      // the line segment from interceptor's previous position to current position.
-      const cx = inter.x - t.x, cy = inter.y - t.y;
-      let minDist = sqrt(cx*cx + cy*cy); // current distance
-      // Check previous position if trail exists
-      if (inter.prevX !== undefined && inter.age >= 2) { // skip swept-volume for first 2 frames — prevX/prevY not yet stable
-        const prev = { x: inter.prevX, y: inter.prevY };
-        const segDx = inter.x - prev.x, segDy = inter.y - prev.y;
-        const segLen2 = segDx * segDx + segDy * segDy;
-        if (segLen2 > 0.01) {
-          // Project threat position onto interceptor's motion segment
-          const tProj = max(0, min(1, ((t.x - prev.x) * segDx + (t.y - prev.y) * segDy) / segLen2));
-          const closestX = prev.x + tProj * segDx;
-          const closestY = prev.y + tProj * segDy;
-          const cdx = closestX - t.x, cdy = closestY - t.y;
-          const segDist = sqrt(cdx*cdx + cdy*cdy);
-          minDist = min(minDist, segDist);
-        }
-      }
-      if (minDist < CFG.KILL_RADIUS) {
-        // IMPROVED: cyan explosion for fast interceptor kills
-        if (inter.isFast) {
-          boom(t.x, t.y, 0, 255, 255, 32); // cyan burst
-        } else {
-          boom(t.x, t.y, 255, 180, 40); // gold intercept explosion
-        }
+      const dx = inter.x - t.x, dy = inter.y - t.y;
+      if (sqrt(dx*dx+dy*dy) < CFG.KILL_RADIUS) {
+        boom(t.x, t.y, t.type);           // threat-colored intercept explosion
         t.alive = false;
         inter.alive = false;
         score.kills++;
-        const intType = inter.isFast ? 'FAST' : 'STD';
-        addLog(`★ INTERCEPT  ${t.type} [${intType}]`);
+        addLog(`★ INTERCEPT  ${t.type}`);
         for (const r of radars) r.tracks.delete(t.id);
-        ewRadar.tracks.delete(t.id); // IMPROVED v1.2: clean EW tracks too
-        break;  // FIX v1.4: exit inner loop — this interceptor is spent
       }
     }
   }
   for (const t of threats) {
     if (!t.alive) continue;
-    if (t.x > CFG.SIM_W * CFG.BATT_X_FRAC) { // reached battery position = leakage
-      boom(t.x, t.y, 255, 40, 40, 40); // red impact explosion
-      boom(t.x, t.y-10, 255, 100, 0, 20);
+    if (t.x > CFG.SIM_W - 3) { // reached protected zone
+      boomLeakage(t.x, t.y);              // large leakage explosion + screen shake
       t.alive = false;
       score.leak++;
       addLog(`⚠  LEAKAGE  ${t.type}  IMPACT`);
@@ -952,52 +776,15 @@ function drawGrid() {
 
 // ── DRAW KALMAN TRACK CROSSHAIRS ──────────────────────────────────────────────
 function drawTracks() {
-  // IMPROVED v1.2: draw EW radar tracks too (orange-tinted crosshairs)
-  // IMPROVED v1.3: Larger, brighter, pulsing crosshairs for visibility
-  const pulseAlpha = 180 + 40 * sin(frameCount * 0.12); // pulsing brightness
-  for (const [, kf] of ewRadar.tracks) {
-    const { x, y } = kf.pos;
-    noFill();
-    stroke(255, 160, 30, pulseAlpha);
-    strokeWeight(1.5);
-    line(x-12,y, x+12,y); line(x,y-12, x,y+12);
-    stroke(255, 160, 30, pulseAlpha * 0.4);
-    ellipse(x, y, 32, 32);
-    const estSpd = kf.speed;
-    if (estSpd > CFG.HYPERSONIC_SPD_THRESH) {
-      stroke(255, 80, 255, 90);
-      strokeWeight(1.5);
-      ellipse(x, y, 30, 30);
-      fill(255, 100, 255, 160);
-      noStroke();
-      textSize(7);
-      textAlign(LEFT);
-      text(`M${(estSpd * 1.5).toFixed(0)}`, x + 14, y + 4);
-    }
-  }
   for (const r of radars) {
     for (const [, kf] of r.tracks) {
       const { x, y } = kf.pos;
       noFill();
-      stroke(0, 255, 65, pulseAlpha);
-      strokeWeight(1.5);
-      line(x-12,y, x+12,y); line(x,y-12, x,y+12); // IMPROVED v1.3: larger crosshair
-      stroke(0, 255, 65, pulseAlpha * 0.4);
-      ellipse(x, y, 32, 32); // IMPROVED v1.3: larger uncertainty circle
-
-      // IMPROVED: highlight fast-mover tracks with a purple-tinted ring
-      const estSpd = kf.speed;
-      if (estSpd > CFG.HYPERSONIC_SPD_THRESH) {
-        stroke(255, 80, 255, 90);
-        strokeWeight(1.5);
-        ellipse(x, y, 30, 30); // larger purple ring = hypersonic alert
-        // Speed readout next to track
-        fill(255, 100, 255, 160);
-        noStroke();
-        textSize(7);
-        textAlign(LEFT);
-        text(`M${(estSpd * 1.5).toFixed(0)}`, x + 14, y + 4);
-      }
+      stroke(0, 255, 65, 150);
+      strokeWeight(1);
+      line(x-7,y, x+7,y); line(x,y-7, x,y+7); // crosshair
+      stroke(0, 255, 65, 50);
+      ellipse(x, y, 22, 22); // uncertainty circle
     }
   }
 }
@@ -1014,13 +801,8 @@ function drawBattery() {
   line(bx - 5, CFG.SIM_H - 14, bx - 5, CFG.SIM_H - 22);
   line(bx,     CFG.SIM_H - 14, bx,     CFG.SIM_H - 24);
   line(bx + 5, CFG.SIM_H - 14, bx + 5, CFG.SIM_H - 22);
-  // IMPROVED: THAAD launcher indicator next to standard battery
-  fill(0, 255, 255, 100); noStroke();
-  rect(bx + 12, CFG.SIM_H - 12, 8, 8, 1);
-  stroke(0, 255, 255); strokeWeight(1);
-  line(bx + 16, CFG.SIM_H - 12, bx + 16, CFG.SIM_H - 20);
   fill(0, 200, 255); noStroke(); textSize(8); textAlign(CENTER);
-  text('SAM/THAAD BATT', bx + 4, CFG.SIM_H + 13);
+  text('SAM BATT', bx, CFG.SIM_H + 13);
   pop();
 }
 
@@ -1065,8 +847,7 @@ function drawPanel() {
   param('Radar range  ', `${CFG.RADAR_RANGE_PX}px`);
   param('Kill radius  ', `${CFG.KILL_RADIUS}px`);
   param('Wave period  ', `${CFG.WAVE_MS/1000}s`);
-  param('STD INT speed', `${CFG.INT_SPEED}px/f`);
-  param('FAST INT spd ', `${CFG.FAST_INT_SPEED}px/f`); // IMPROVED: show fast interceptor speed
+  param('INT speed    ', `${CFG.INT_SPEED}px/f`);
 
   // ── Legend
   y += 4; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
@@ -1076,8 +857,7 @@ function drawPanel() {
     [[255,160,40], '▶ Cruise (CRZ)'],
     [[180,80,255], '▶ Hypersonic (HGV)'],
     [[60,255,180], '▶ Drone swarm'],
-    [[0,210,255],  '◁ Interceptor STD (PN)'],
-    [[0,255,255],  '◁ Interceptor FAST (PN)'], // IMPROVED: fast interceptor in legend
+    [[0,210,255],  '◁ Interceptor (PN)'],
     [[0,255,65],   '◎ Radar + track'],
   ];
   for (const [c, l] of leg) {
@@ -1123,21 +903,20 @@ function initGame() {
   threats     = [];
   interceptors= [];
   particles   = [];
-  // Three ground radars placed at different downrange positions for overlapping coverage
+  shockwaves  = [];
+  screenShake = { intensity: 0, frames: 0 };
+  // Three radars placed at different downrange positions for overlapping coverage
   radars = [
     new Radar(0.33, 0),
     new Radar(0.58, 1),
     new Radar(0.78, 2),
   ];
-  // IMPROVED v1.2: Elevated early-warning radar for high-altitude threat detection
-  ewRadar = new EWRadar();
   score       = { wave: 0, kills: 0, leak: 0, shots: 0 };
   log         = [];
   gameOver    = false;
   lastWave    = millis();
-  lastC2Frame = 0;
   addLog('SYSTEM NOMINAL — AWAITING THREATS');
-  addLog('SAM/THAAD BATTERY ONLINE');
+  addLog('SAM BATTERY ONLINE');
 }
 
 // ── P5.JS ENTRY POINTS ────────────────────────────────────────────────────────
@@ -1149,6 +928,14 @@ function setup() {
 
 function draw() {
   background(4, 10, 4); // deep phosphor-green-tinted black
+
+  // ── Screen shake effect (from leakage impacts)
+  push();
+  if (screenShake.frames > 0) {
+    translate(random(-screenShake.intensity, screenShake.intensity), random(-screenShake.intensity, screenShake.intensity));
+    screenShake.frames--;
+  }
+
   drawGrid();
 
   // ── Wave spawning timer
@@ -1169,42 +956,20 @@ function draw() {
   // ── Radar tracking (detect + Kalman predict/update)
   const liveThreats = threats.filter(t => t.alive);
   for (const r of radars) r.update(liveThreats);
-  ewRadar.update(liveThreats); // IMPROVED v1.2: EW radar updates too
 
-  // ── C2 interceptor assignment (IMPROVED: adaptive cooldown)
-  // Check for hypersonic threats more frequently (every 10 frames ≈ 0.17s)
-  // Check for standard threats at normal rate (every 30 frames ≈ 0.5s)
-  if (!gameOver) {
-    const elapsed = frameCount - lastC2Frame;
-    // Detect if any active track looks hypersonic (check ground + EW radars)
-    let hasHypersonicTrack = false;
-    const allRadarSources = [...radars, ewRadar]; // IMPROVED v1.2: include EW radar
-    for (const r of allRadarSources) {
-      for (const [, kf] of r.tracks) {
-        if (kf.speed > CFG.HYPERSONIC_SPD_THRESH) {
-          hasHypersonicTrack = true;
-          break;
-        }
-      }
-      if (hasHypersonicTrack) break;
-    }
-    // IMPROVED: adaptive cooldown — fast loop when hypersonic threat detected
-    const cooldown = hasHypersonicTrack ? CFG.C2_FAST_COOLDOWN : CFG.C2_STD_COOLDOWN;
-    if (elapsed >= cooldown) {
-      runC2();
-      lastC2Frame = frameCount;
-    }
-  }
+  // ── C2 interceptor assignment (checked every 30 frames ≈ 0.5s)
+  if (!gameOver && frameCount % 30 === 0) runC2();
 
   // ── Interceptor updates (PN guidance)
   for (const i of interceptors) if (i.alive) i.update();
   interceptors = interceptors.filter(i => i.alive);
 
-  // ── Outcome check (MOVED v1.4: before drawing so dead objects don't render for 1 frame)
+  // ── Outcome check
   if (!gameOver) checkCollisions();
-  // FIX v1.4: re-filter after collisions to remove newly-killed objects before drawing
-  threats = threats.filter(t => t.alive);
-  interceptors = interceptors.filter(i => i.alive);
+
+  // ── Shockwave update + draw (drawn BEFORE particles for layering)
+  shockwaves = shockwaves.filter(s => { s.update(); return !s.dead; });
+  for (const s of shockwaves) s.draw();
 
   // ── Particle update + draw
   for (const p of particles) { p.update(); p.draw(); }
@@ -1214,11 +979,12 @@ function draw() {
   for (const t of threats) if (t.alive) t.draw();
   for (const i of interceptors) if (i.alive) i.draw();
   for (const r of radars) r.draw();
-  ewRadar.draw(); // IMPROVED v1.2: draw EW radar
   drawBattery();
   drawTracks();
 
-  // ── HUD + panel
+  pop(); // end screen shake transform
+
+  // ── HUD + panel (drawn outside shake transform so UI stays stable)
   drawPanel();
   if (gameOver) drawGameOver();
 }
