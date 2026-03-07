@@ -222,7 +222,7 @@ class KF1D {
 
 // Pair of 1D Kalman filters gives 2D position+velocity tracking
 class KalmanTrack {
-  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); this.age = 0; }
+  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); this.age = -1; } // FIX LOW-3: start at -1 so first predict() brings age to 0; minKfAge checks are now semantically correct
   predict(dt = 1)  { this.kx.predict(dt); this.ky.predict(dt); this.age++; }
   update(x, y)     { this.kx.update(x); this.ky.update(y); }
   get pos()        { return { x: this.kx.pos, y: this.ky.pos }; }
@@ -441,7 +441,7 @@ class Threat {
   }
   saveTrail() {
     this.trail.push({ x: this.x, y: this.y });
-    if (this.trail.length > 45) this.trail.shift();
+    if (this.trail.length >= 45) this.trail.shift(); // FIX LOW-2: strict max 45 (was > 45, allowing 46 transiently)
   }
   drawTrail(r, g, b, maxWidth = 3, minWidth = 0.5) {
     noFill();
@@ -658,7 +658,7 @@ class Drone extends Threat {
   // v2.0: Shorter trail for small drones
   saveTrail() {
     this.trail.push({ x: this.x, y: this.y });
-    if (this.trail.length > 18) this.trail.shift();
+    if (this.trail.length >= 18) this.trail.shift(); // FIX LOW-2: strict max 18 (was > 18, allowing 19 transiently)
   }
   update(peers) {
     this.saveTrail();
@@ -808,6 +808,14 @@ class Interceptor {
     this.prevX = this.x;
     this.prevY = this.y;
     this.x += this.vx; this.y += this.vy;
+
+    // FIX MEDIUM-1: NaN-immortal interceptor guard — if any velocity/position
+    // component becomes non-finite (NaN/Inf), kill immediately to prevent
+    // immortal array-slot leak and dangling C2 engaged-Set reference.
+    if (!isFinite(this.x) || !isFinite(this.y) ||
+        !isFinite(this.vx) || !isFinite(this.vy)) {
+      this.alive = false; return;
+    }
 
     // Kill if out of sim bounds (missed)
     if (this.x<-30||this.x>CFG.SIM_W+30||this.y<-60||this.y>CFG.SIM_H+20) this.alive=false;
@@ -968,14 +976,19 @@ let lastC2Frame = 0;
 function runC2() {
   // Merge tracks from all radars (ground + EW) into a single threat→KF map
   const allTracks = new Map(); // threatId → KalmanTrack
+  // FIX MEDIUM-3: Prefer the most mature (highest age) KalmanTrack for each
+  // threat across all radars. Previously first-seen won, which could give a
+  // less-settled ground radar KF priority over a better EW radar KF.
   for (const r of radars) {
     for (const [id, kf] of r.tracks) {
-      if (!allTracks.has(id)) allTracks.set(id, kf);
+      if (!allTracks.has(id) || kf.age > allTracks.get(id).age)
+        allTracks.set(id, kf);
     }
   }
   // IMPROVED v1.2: also merge EW radar tracks (critical for high-altitude HGVs)
   for (const [id, kf] of ewRadar.tracks) {
-    if (!allTracks.has(id)) allTracks.set(id, kf);
+    if (!allTracks.has(id) || kf.age > allTracks.get(id).age)
+      allTracks.set(id, kf);
   }
   // Collect KF objects already being chased by active interceptors
   const engaged = new Set(interceptors.filter(i => i.alive).map(i => i.track));
@@ -997,9 +1010,12 @@ function runC2() {
     const engageThresh = isHypersonic ? CFG.C2_EARLY_ENGAGE_FRAC : CFG.C2_ENGAGE_RANGE_FRAC;
     if (kf.pos.x < CFG.SIM_W * engageThresh) continue;
     if (kf.pos.x > CFG.BATT_X_FRAC * CFG.SIM_W) continue; // threat already past battery, don't waste interceptor
-    // FIX: Reduce KF stabilization wait for slow threats (drones, cruise).
-    // Hypersonic threats need 4 frames for velocity to settle; others only need 2.
-    const minKfAge = isHypersonic ? 4 : 2;
+    // FIX MEDIUM-2: Reduce KF stabilization wait for slow threats.
+    // Hypersonic: 4 frames; standard: 2 frames; drone-speed (<2.0 px/f): 1 frame.
+    // Drone rcs=0.05 gives only ~5% Pd/frame, so waiting 2 frames causes ~40-frame
+    // engagement delay. Dropping to age>=1 halves this for very slow targets.
+    const isDroneSlow = estSpeed < 2.0;
+    const minKfAge = isHypersonic ? 4 : (isDroneSlow ? 1 : 2);
     if (kf.age < minKfAge) continue; // wait for Kalman velocity to stabilize
 
     candidates.push({ id, kf, threat, estSpeed, isHypersonic });
