@@ -213,8 +213,8 @@ class KF1D {
 
 // Pair of 1D Kalman filters gives 2D position+velocity tracking
 class KalmanTrack {
-  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); }
-  predict()        { this.kx.predict(); this.ky.predict(); }
+  constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); this.age = 0; }
+  predict()        { this.kx.predict(); this.ky.predict(); this.age++; }
   update(x, y)     { this.kx.update(x); this.ky.update(y); }
   get pos()        { return { x: this.kx.pos, y: this.ky.pos }; }
   get vel()        { return { x: this.kx.vel, y: this.ky.vel }; }
@@ -614,9 +614,23 @@ class Interceptor {
     const aimDx = px - x;
     const aimDy = py - y;
     const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy);
+    let aim = Math.atan2(aimDy, aimDx);
+    // Clamp: interceptor must launch leftward and upward
+    // Valid range: roughly -PI (hard left) through -PI/2 (straight up) to just barely left of straight up
+    // aim must have negative vy component (upward) and negative or zero vx component (leftward)
+    // That means aim must be between -PI and -PI/2 (third quadrant in screen coords = up-left)
+    // Allow some tolerance: between -PI and -PI*0.15 (almost straight up, slightly right is OK for edge cases)
+    if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
+        // Default to aiming at the threat's current position instead
+        aim = Math.atan2(tp.y - y, tp.x - x);
+        // If STILL not leftward-upward, force a default ~45deg up-left
+        if (aim > -Math.PI * 0.15 || aim < -Math.PI) {
+            aim = -Math.PI * 0.75; // 135 degrees = up-left at 45deg
+        }
+    }
     if (aimDist > 0.1) {
-      this.vx = (aimDx / aimDist) * this.speed;
-      this.vy = (aimDy / aimDist) * this.speed;
+      this.vx = Math.cos(aim) * this.speed;
+      this.vy = Math.sin(aim) * this.speed;
     } else {
       this.vx = 0;
       this.vy = -this.speed;
@@ -780,6 +794,8 @@ function runC2() {
     // Standard: engage after 25% range crossed (confirmed inbound)
     const engageThresh = isHypersonic ? CFG.C2_EARLY_ENGAGE_FRAC : CFG.C2_ENGAGE_RANGE_FRAC;
     if (kf.pos.x < CFG.SIM_W * engageThresh) continue;
+    if (kf.pos.x > CFG.BATT_X_FRAC * CFG.SIM_W) continue; // threat already past battery, don't waste interceptor
+    if (kf.age < 4) continue; // wait for Kalman velocity to stabilize
 
     candidates.push({ id, kf, threat, estSpeed, isHypersonic });
   }
@@ -851,7 +867,7 @@ function checkCollisions() {
       const cx = inter.x - t.x, cy = inter.y - t.y;
       let minDist = sqrt(cx*cx + cy*cy); // current distance
       // Check previous position if trail exists
-      if (inter.prevX !== undefined) {
+      if (inter.prevX !== undefined && inter.age >= 2) { // skip swept-volume for first 2 frames — prevX/prevY not yet stable
         const prev = { x: inter.prevX, y: inter.prevY };
         const segDx = inter.x - prev.x, segDy = inter.y - prev.y;
         const segLen2 = segDx * segDx + segDy * segDy;
