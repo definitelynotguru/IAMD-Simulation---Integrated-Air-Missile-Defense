@@ -76,6 +76,7 @@ const CFG = {
   INT_SPEED: 7.5,         // px/frame (≈ Mach 4–5 scaled)
   INT_MAX_ACCEL: 1.3,     // px/frame² maneuver limit
   KILL_RADIUS: 16,        // px proximity fuze radius (≈ 400 m scaled)
+  INT_MAX_AGE: 300,       // visual-only: frames before fuel-low flicker triggers (visual cue)
 
   // Threat speeds (px/frame — faster = harder to intercept)
   SPD_BALLISTIC:  3.2,    // Mach ~3 (terminal descent leg)
@@ -94,26 +95,36 @@ const CFG = {
 
   // Interceptor battery position (right side, protected zone)
   BATT_X_FRAC: 0.87,
-
-  // EW Radar — elevated early-warning radar (longer range, full 360°)
-  EW_RADAR_RANGE_PX: 420, // extended detection range for early warning
 };
 
 // ── WORLD ↔ CANVAS COORDINATE TRANSFORMS ─────────────────────────────────────
-const scX = () => CFG.SIM_W / CFG.RANGE_KM;
-const scY = () => CFG.SIM_H / CFG.ALT_KM;
+// World:  rangeKm ∈ [0, 500],  altKm ∈ [0, 80]  (altKm=0 is ground)
+// Canvas: x ∈ [0, SIM_W],      y ∈ [0, SIM_H]   (y=0 is top of screen)
+// Threats fly LEFT→RIGHT; altitude increases upward (y decreases on canvas).
+const scX = () => CFG.SIM_W / CFG.RANGE_KM; // px per km (range)
+const scY = () => CFG.SIM_H / CFG.ALT_KM;   // px per km (altitude)
 
 // ── SIMPLIFIED DECOUPLED KALMAN FILTER ───────────────────────────────────────
+// Tracks one axis (position + velocity) using two-state Kalman equations.
+//
+// State:      x̂ = [pos, vel]
+// Prediction: x̂_k|k-1 = F · x̂_k-1  where F = [[1,1],[0,1]]
+//             P_k|k-1  = F · P · Fᵀ + Q
+// Update:     K = P · Hᵀ · (H·P·Hᵀ + R)⁻¹   H = [1, 0]
+//             x̂ = x̂ + K · (z − H·x̂)
+//             P = (I − K·H) · P
 class KF1D {
   constructor(initPos) {
     this.pos = initPos;
     this.vel = 0;
-    this.Pp = 100;
-    this.Pv = 10;
-    this.Pxv = 0;
+    this.Pp = 100;  // position variance (high init = high uncertainty)
+    this.Pv = 10;   // velocity variance
+    this.Pxv = 0;   // cross-covariance position-velocity
   }
   predict() {
+    // New position estimate: pos += vel (constant-velocity model)
     this.pos += this.vel;
+    // Propagate covariance through F = [[1,1],[0,1]]:
     const q = CFG.KALMAN_Q;
     const newPp  = this.Pp + 2 * this.Pxv + this.Pv + q;
     const newPxv = this.Pxv + this.Pv;
@@ -121,18 +132,24 @@ class KF1D {
     this.Pp = newPp; this.Pxv = newPxv; this.Pv = newPv;
   }
   update(meas) {
+    // Innovation: difference between measurement and prediction
     const inn = meas - this.pos;
+    // Innovation covariance: S = H·P·Hᵀ + R  →  S = Pp + R
     const S = this.Pp + CFG.KALMAN_R;
+    // Kalman gain: K = P·Hᵀ·S⁻¹
     const Kp  = this.Pp  / S;
     const Kv  = this.Pxv / S;
+    // State update: blend prediction with measurement
     this.pos += Kp * inn;
     this.vel += Kv * inn;
+    // Covariance update: P = (I − K·H)·P
     this.Pp  -= Kp * this.Pp;
     this.Pxv -= Kp * this.Pxv;
     this.Pv  -= Kv * this.Pxv;
   }
 }
 
+// Pair of 1D Kalman filters gives 2D position+velocity tracking
 class KalmanTrack {
   constructor(x, y) { this.kx = new KF1D(x); this.ky = new KF1D(y); }
   predict()        { this.kx.predict(); this.ky.predict(); }
@@ -144,15 +161,18 @@ class KalmanTrack {
 // ── RADAR STATION ─────────────────────────────────────────────────────────────
 class Radar {
   constructor(fracX, id) {
-    this.x    = fracX * CFG.SIM_W;
-    this.y    = CFG.SIM_H;
+    this.x    = fracX * CFG.SIM_W;  // ground-level placement (horizontal)
+    this.y    = CFG.SIM_H;          // always at ground (bottom of screen)
     this.id   = id;
     this.rng  = CFG.RADAR_RANGE_PX;
-    this.tracks = new Map();
-    this.sweep  = random(TWO_PI);
-    this.blips  = [];  // v2.0-B: detection blip flash storage
+    this.tracks = new Map();         // threatId → KalmanTrack
+    this.sweep  = random(TWO_PI);    // animation phase offset
   }
 
+  // Radar range equation (simplified gameplay version):
+  // P_detect = 1 / (1 + (R/R_max)^4) × (σ/σ_nom)
+  // The (R/R_max)^4 term comes from the full radar range equation:
+  // P_t·G_t·G_r·λ²·σ / ((4π)³·R⁴·kTBF) — fourth-power range law
   detectProb(t) {
     const dx = t.x - this.x, dy = t.y - this.y;
     const R  = sqrt(dx*dx + dy*dy);
@@ -163,88 +183,37 @@ class Radar {
   }
 
   update(threats) {
-    this.sweep += 0.04; // v2.0-B: faster sweep for visible rotation effect (was 0.02)
+    this.sweep += 0.02; // sweep animation rate
     for (const t of threats) {
       if (!t.alive) { this.tracks.delete(t.id); continue; }
       const p = this.detectProb(t);
       if (random() < p) {
+        // Measurement is noisy: add Gaussian noise (σ ≈ 4px ≈ several hundred metres)
         const mx = t.x + randomGaussian(0, 4);
         const my = t.y + randomGaussian(0, 4);
         if (!this.tracks.has(t.id)) {
-          this.tracks.set(t.id, new KalmanTrack(mx, my));
+          this.tracks.set(t.id, new KalmanTrack(mx, my)); // first detection
         } else {
           const kf = this.tracks.get(t.id);
-          kf.predict();
-          kf.update(mx, my);
+          kf.predict();   // advance state forward one timestep
+          kf.update(mx, my); // correct with new measurement
         }
       }
     }
   }
 
-  // v2.0-B: Rotating radar sweep line with afterglow and detection blips
   draw() {
     push();
-    // Static range arc boundary (dim)
+    // Animated radar range ring (pulsing outward)
+    const r = this.rng * (0.45 + 0.45 * abs(sin(this.sweep)));
     noFill();
-    stroke(0, 200, 55, 25);
+    stroke(0, 255, 65, 30);
     strokeWeight(1);
+    ellipse(this.x, this.y, r * 2, r * 2);
+
+    // Detection arc boundary (upper hemisphere only)
+    stroke(0, 200, 55, 55);
     arc(this.x, this.y, this.rng * 2, this.rng * 2, -PI, 0);
-
-    // Rotating sweep line
-    const sweepAngle = -PI + (this.sweep % PI); // rotate within upper hemisphere (-PI to 0)
-    // Sweep line with gradient (bright at base, fades at tip)
-    for (let r = 0; r < this.rng; r += 3) {
-      const alpha = map(r, 0, this.rng, 120, 0);
-      stroke(0, 255, 65, alpha);
-      strokeWeight(1.5);
-      const px = this.x + cos(sweepAngle) * r;
-      const py = this.y + sin(sweepAngle) * r;
-      point(px, py);
-    }
-
-    // Afterglow arc behind sweep (30-degree trailing fade)
-    const trailArc = PI / 6; // 30 degrees
-    for (let a = 0; a < trailArc; a += 0.02) {
-      const trailAngle = sweepAngle - a; // behind the sweep
-      // Only draw in upper hemisphere
-      if (trailAngle < -PI || trailAngle > 0) continue;
-      const alpha = map(a, 0, trailArc, 30, 0);
-      stroke(0, 255, 65, alpha);
-      strokeWeight(1);
-      for (let r = 20; r < this.rng; r += 8) {
-        const rAlpha = map(r, 20, this.rng, alpha, 0);
-        stroke(0, 255, 65, rAlpha);
-        const px = this.x + cos(trailAngle) * r;
-        const py = this.y + sin(trailAngle) * r;
-        point(px, py);
-      }
-    }
-
-    // Update and draw detection blips
-    if (!this.blips) this.blips = [];
-    // Check if sweep passes near any tracked threats
-    for (const [id, kf] of this.tracks) {
-      const dx = kf.pos.x - this.x;
-      const dy = kf.pos.y - this.y;
-      if (dy > 0) continue; // only upper hemisphere
-      const threatAngle = atan2(dy, dx);
-      let angleDiff = abs(sweepAngle - threatAngle);
-      if (angleDiff > PI) angleDiff = TWO_PI - angleDiff;
-      if (angleDiff < 0.08) { // ~5 degrees
-        // Check if blip already exists for this track
-        if (!this.blips.find(b => b.id === id)) {
-          this.blips.push({ x: kf.pos.x, y: kf.pos.y, life: 6, id: id });
-        }
-      }
-    }
-    // Draw and age blips
-    this.blips = this.blips.filter(b => {
-      b.life--;
-      noStroke();
-      fill(0, 255, 65, map(b.life, 0, 6, 40, 200));
-      ellipse(b.x, b.y, 6, 6);
-      return b.life > 0;
-    });
 
     // Radar site marker: upward-pointing triangle
     fill(0, 255, 65);
@@ -261,127 +230,16 @@ class Radar {
   }
 }
 
-// ── EW RADAR (Early Warning) — Elevated, longer range, 360° coverage ─────────
-// v2.0-B: Orange-tinted rotating sweep with slower rotation for long-range search
-class EWRadar {
-  constructor(fracX, fracY) {
-    this.x    = fracX * CFG.SIM_W;
-    this.y    = fracY * CFG.SIM_H;  // elevated position (not ground-level)
-    this.rng  = CFG.EW_RADAR_RANGE_PX;
-    this.tracks = new Map();
-    this.sweep  = random(TWO_PI);
-    this.blips  = [];
-  }
-
-  detectProb(t) {
-    const dx = t.x - this.x, dy = t.y - this.y;
-    const R  = sqrt(dx*dx + dy*dy);
-    if (R > this.rng) return 0;
-    const rangeFactor = 1 / (1 + pow(R / this.rng, 4));
-    const rcsFactor   = t.rcs / CFG.RADAR_SIGMA_NOM;
-    return rangeFactor * rcsFactor * 0.7; // slightly lower Pd than ground radars (long range trade-off)
-  }
-
-  update(threats) {
-    this.sweep += 0.015; // slower rotation — correct for longer-range radar
-    for (const t of threats) {
-      if (!t.alive) { this.tracks.delete(t.id); continue; }
-      const p = this.detectProb(t);
-      if (random() < p) {
-        const mx = t.x + randomGaussian(0, 6); // slightly noisier at long range
-        const my = t.y + randomGaussian(0, 6);
-        if (!this.tracks.has(t.id)) {
-          this.tracks.set(t.id, new KalmanTrack(mx, my));
-        } else {
-          const kf = this.tracks.get(t.id);
-          kf.predict();
-          kf.update(mx, my);
-        }
-      }
-    }
-  }
-
-  // v2.0-B: Orange-tinted 360° rotating sweep with afterglow and detection blips
-  draw() {
-    push();
-    // Static range boundary (dim orange)
-    noFill();
-    stroke(255, 140, 20, 20);
-    strokeWeight(1);
-    ellipse(this.x, this.y, this.rng * 2, this.rng * 2);
-
-    // Rotating sweep line — full 360 degrees (elevated radar sees all around)
-    const sweepAngle = this.sweep % TWO_PI;
-    for (let r = 0; r < this.rng; r += 4) {
-      const alpha = map(r, 0, this.rng, 90, 0);
-      stroke(255, 160, 30, alpha);
-      strokeWeight(1.5);
-      const px = this.x + cos(sweepAngle) * r;
-      const py = this.y + sin(sweepAngle) * r;
-      point(px, py);
-    }
-
-    // Afterglow arc (25 degrees behind)
-    const trailArc = PI / 7.2;
-    for (let a = 0; a < trailArc; a += 0.025) {
-      const trailAngle = sweepAngle - a;
-      const alpha = map(a, 0, trailArc, 22, 0);
-      stroke(255, 160, 30, alpha);
-      strokeWeight(1);
-      for (let r = 30; r < this.rng; r += 10) {
-        const rAlpha = map(r, 30, this.rng, alpha, 0);
-        stroke(255, 160, 30, rAlpha);
-        point(this.x + cos(trailAngle) * r, this.y + sin(trailAngle) * r);
-      }
-    }
-
-    // Detection blips
-    if (!this.blips) this.blips = [];
-    for (const [id, kf] of this.tracks) {
-      const dx = kf.pos.x - this.x;
-      const dy = kf.pos.y - this.y;
-      const threatAngle = atan2(dy, dx);
-      let angleDiff = abs(sweepAngle - threatAngle);
-      if (angleDiff > PI) angleDiff = TWO_PI - angleDiff;
-      if (angleDiff < 0.08) {
-        if (!this.blips.find(b => b.id === id)) {
-          this.blips.push({ x: kf.pos.x, y: kf.pos.y, life: 6, id: id });
-        }
-      }
-    }
-    this.blips = this.blips.filter(b => {
-      b.life--;
-      noStroke();
-      fill(255, 160, 30, map(b.life, 0, 6, 30, 180));
-      ellipse(b.x, b.y, 5, 5);
-      return b.life > 0;
-    });
-
-    // EW radar marker: diamond shape
-    fill(255, 160, 30);
-    noStroke();
-    quad(this.x, this.y - 10, this.x + 7, this.y, this.x, this.y + 10, this.x - 7, this.y);
-
-    // Label
-    fill(255, 140, 20);
-    noStroke();
-    textSize(7);
-    textAlign(CENTER);
-    text('EW-1', this.x, this.y + 18);
-    pop();
-  }
-}
-
 // ── THREAT BASE CLASS ─────────────────────────────────────────────────────────
-let _tid = 0;
+let _tid = 0; // global threat ID counter
 
 class Threat {
   constructor(type, rcs) {
     this.id    = _tid++;
     this.type  = type;
-    this.rcs   = rcs;
+    this.rcs   = rcs;   // Radar Cross Section (m² equiv.) — lower = stealthier
     this.alive = true;
-    this.trail = [];
+    this.trail = [];    // position history for motion trail
     this.x = 0; this.y = 0;
     this.vx = 0; this.vy = 0;
   }
@@ -389,16 +247,20 @@ class Threat {
     this.trail.push({ x: this.x, y: this.y });
     if (this.trail.length > 45) this.trail.shift();
   }
-  drawTrail(r, g, b) {
+  // v2.0-C: Gradient trail — width tapers from minWidth (tail) to maxWidth (head),
+  // opacity fades from 0 (tail) to 170 (head). Uses line segments for per-segment control.
+  drawTrail(r, g, b, maxWidth = 3, minWidth = 0.5) {
     noFill();
-    beginShape();
-    for (let i = 0; i < this.trail.length; i++) {
-      stroke(r, g, b, map(i, 0, this.trail.length, 0, 170));
-      strokeWeight(1);
-      vertex(this.trail[i].x, this.trail[i].y);
+    for (let i = 1; i < this.trail.length; i++) {
+      const t = i / this.trail.length; // 0 at tail, 1 at head
+      const alpha = t * 170;
+      const w = lerp(minWidth, maxWidth, t);
+      stroke(r, g, b, alpha);
+      strokeWeight(w);
+      line(this.trail[i-1].x, this.trail[i-1].y, this.trail[i].x, this.trail[i].y);
     }
-    endShape();
   }
+  // Label each threat near its icon
   drawLabel(label, r, g, b) {
     fill(r, g, b, 190);
     noStroke();
@@ -409,18 +271,26 @@ class Threat {
 }
 
 // ── BALLISTIC MISSILE ─────────────────────────────────────────────────────────
+// Trajectory follows projectile kinematics:
+// x(t) = x₀ + vx·t
+// y(t) = y₀ + vy·t + ½·g·t²   (in px-space, g = GRAVITY_PX, y increases downward)
+// Enters from left on ascending leg; gravity curves it down toward target.
 class BallisticMissile extends Threat {
   constructor(xOffset = 0) {
-    super('BALLISTIC', 0.9);
+    super('BALLISTIC', 0.9);   // large RCS — easy to detect but hard to intercept at speed
     this.x  = -10 - xOffset;
-    this.y  = CFG.SIM_H;
+    this.y  = CFG.SIM_H;      // launch from ground (left edge)
     this.vx = CFG.SPD_BALLISTIC;
+    // vy needed to reach peak altitude ≈ 55% of SIM_H from ground.
+    // Kinematics: vy₀ = -sqrt(2·g·h_peak)  (negative = upward on canvas)
     const peakPx = CFG.SIM_H * 0.55;
     this.vy = -sqrt(2 * CFG.GRAVITY_PX * peakPx);
+    this.spawnAge = 0; // v2.0-D: frame counter for boost exhaust flare
   }
   update() {
+    this.spawnAge++;
     this.saveTrail();
-    this.vy += CFG.GRAVITY_PX;
+    this.vy += CFG.GRAVITY_PX; // gravitational acceleration (adds to vy → increases downward speed)
     this.x  += this.vx;
     this.y  += this.vy;
     if (this.y > CFG.SIM_H + 5 || this.x > CFG.SIM_W + 5) this.alive = false;
@@ -429,71 +299,112 @@ class BallisticMissile extends Threat {
     this.drawTrail(255, 80, 60);
     push();
     translate(this.x, this.y);
-    rotate(atan2(this.vy, this.vx));
+    rotate(atan2(this.vy, this.vx)); // point in direction of travel
     fill(255, 80, 60);
     noStroke();
-    triangle(-8, -3, -8, 3, 7, 0);
+    triangle(-8, -3, -8, 3, 7, 0);  // elongated body
     pop();
+    // v2.0-D: Boost phase exhaust flare (fades over first 25 frames)
+    if (this.spawnAge < 25) {
+      const flareAlpha = map(this.spawnAge, 0, 25, 220, 0);
+      const flareSize = map(this.spawnAge, 0, 25, 12, 3);
+      push();
+      translate(this.x, this.y);
+      rotate(atan2(this.vy, this.vx));
+      noStroke();
+      // Orange-yellow exhaust
+      fill(255, 200, 50, flareAlpha);
+      ellipse(-10, 0, flareSize, flareSize * 0.6);
+      // Bright white core
+      fill(255, 255, 220, flareAlpha * 0.8);
+      ellipse(-9, 0, flareSize * 0.4, flareSize * 0.3);
+      pop();
+    }
     this.drawLabel('BSTC', 255, 110, 80);
   }
 }
 
 // ── CRUISE MISSILE ────────────────────────────────────────────────────────────
+// Constant-altitude subsonic flight with gentle terrain-following oscillation.
+// Low RCS (σ=0.4) → harder to detect than ballistic.
 class CruiseMissile extends Threat {
   constructor(xOff = 0) {
     super('CRUISE', 0.4);
     this.x  = -10 - xOff;
-    this.y  = CFG.SIM_H - random(55, 150);
+    this.y  = CFG.SIM_H - random(55, 150); // low-altitude ingress
     this.vx = CFG.SPD_CRUISE;
     this.vy = 0;
-    this.phase = random(TWO_PI);
+    this.phase = random(TWO_PI); // sinusoidal altitude variation phase
   }
   update() {
     this.saveTrail();
     this.phase += 0.035;
-    this.y  += sin(this.phase) * 0.25;
+    this.y  += sin(this.phase) * 0.25; // mild terrain-following undulation
     this.x  += this.vx;
     if (this.x > CFG.SIM_W + 5) this.alive = false;
   }
   draw() {
+    // v2.0-D: Faint terrain shadow line beneath (ground projection)
+    stroke(255, 160, 40, 15);
+    strokeWeight(0.5);
+    line(this.x - 20, CFG.SIM_H, this.x + 5, CFG.SIM_H);
     this.drawTrail(255, 160, 40);
     push();
     translate(this.x, this.y);
     fill(255, 160, 40);
     noStroke();
-    ellipse(0, 0, 16, 5);
-    rect(-5, -6, 12, 2);
+    ellipse(0, 0, 16, 5);  // flat fuselage
+    rect(-5, -6, 12, 2);   // wing
     pop();
     this.drawLabel('CRZ', 255, 190, 80);
   }
 }
 
 // ── HYPERSONIC GLIDE VEHICLE ──────────────────────────────────────────────────
+// High speed, shallow glide path, slight maneuverability — defeats standard PN.
+// Speed makes it extremely difficult to intercept with conventional SAMs.
+// Real HGVs (DF-17, Avangard): Mach 5–10, pull-up/skip-glide maneuver.
 class HypersonicGlide extends Threat {
   constructor() {
-    super('HYPERSONIC', 0.6);
+    super('HYPERSONIC', 0.6); // moderate RCS but very high closure speed
     this.x  = -10;
-    this.y  = CFG.SIM_H * 0.22;
+    this.y  = CFG.SIM_H * 0.22; // enters at ~60 km altitude equivalent
     this.vx = CFG.SPD_HYPERSONIC;
-    this.vy = 0.7;
+    this.vy = 0.7;              // shallow downward glide slope
     this.wobPhase = random(TWO_PI);
-    this.wobAmp   = random(0.04, 0.14);
+    this.wobAmp   = random(0.04, 0.14); // terminal evasive maneuver amplitude
   }
   update() {
     this.saveTrail();
     this.wobPhase += 0.09;
-    this.vy += 0.005;
+    this.vy += 0.005; // gentle gravity pull into descent
+    // Lateral (vertical on screen) wobble simulates skip-glide maneuver
     this.y  += this.vy + sin(this.wobPhase) * this.wobAmp;
     this.x  += this.vx;
     if (this.x > CFG.SIM_W + 5 || this.y > CFG.SIM_H + 5) this.alive = false;
   }
   draw() {
-    this.drawTrail(180, 80, 255);
+    // v2.0-C: Wider trail for HGV heat signature
+    this.drawTrail(180, 80, 255, 4.5, 1.0);
+    // v2.0-D: Reentry plasma glow — orange-white halo that scales with speed
+    const spd = sqrt(this.vx * this.vx + this.vy * this.vy);
+    const glowSize = map(spd, 3, 10, 8, 22);
+    const shimmer = sin(frameCount * 0.3 + this.wobPhase) * 2; // heat shimmer oscillation
+    push();
+    noStroke();
+    // Outer glow (orange, large)
+    fill(255, 140, 40, 35);
+    ellipse(this.x + shimmer * 0.5, this.y + shimmer * 0.3, glowSize * 2, glowSize * 1.4);
+    // Inner glow (white-hot)
+    fill(255, 220, 180, 55);
+    ellipse(this.x + shimmer * 0.3, this.y + shimmer * 0.2, glowSize, glowSize * 0.7);
+    pop();
     push();
     translate(this.x, this.y);
     rotate(atan2(this.vy, this.vx));
     fill(180, 80, 255);
     noStroke();
+    // Wedge / lifting-body cross-section
     quad(-8, 5, 9, 0, -8, -2, -11, 3);
     pop();
     this.drawLabel('HGV', 210, 120, 255);
@@ -501,17 +412,26 @@ class HypersonicGlide extends Threat {
 }
 
 // ── DRONE (single unit in a swarm) ───────────────────────────────────────────
+// Boids algorithm implements three flocking forces:
+//   Separation : steer away from too-close neighbors (avoid collisions)
+//   Alignment  : match average velocity of nearby drones (fly together)
+//   Cohesion   : steer toward centroid of nearby drones (stay grouped)
 class Drone extends Threat {
   constructor(x, y) {
-    super('DRONE', 0.05);
+    super('DRONE', 0.05);   // tiny RCS — nearly invisible to radar!
     this.x  = x; this.y = y;
     this.vx = CFG.SPD_DRONE + random(-0.3, 0.3);
     this.vy = random(-0.25, 0.25);
   }
+  // v2.0-C: Override saveTrail for shorter drone trails
+  saveTrail() {
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > 18) this.trail.shift(); // shorter trail for small drones
+  }
   applyBoids(drones) {
-    let sx=0, sy=0, sc=0;
-    let ax=0, ay=0, ac=0;
-    let cx=0, cy=0, cc=0;
+    let sx=0, sy=0, sc=0;    // separation
+    let ax=0, ay=0, ac=0;    // alignment
+    let cx=0, cy=0, cc=0;    // cohesion
     for (const o of drones) {
       if (o === this || !o.alive) continue;
       const dx = this.x-o.x, dy = this.y-o.y;
@@ -523,6 +443,7 @@ class Drone extends Threat {
     if (sc > 0) { this.vx += (sx/sc)*0.09; this.vy += (sy/sc)*0.09; }
     if (ac > 0) { this.vx += (ax/ac - this.vx)*0.04; this.vy += (ay/ac - this.vy)*0.04; }
     if (cc > 0) { this.vx += ((cx/cc)-this.x)*0.002; this.vy += ((cy/cc)-this.y)*0.002; }
+    // Speed clamp: drones are slow
     const spd = sqrt(this.vx*this.vx + this.vy*this.vy);
     if (spd > CFG.SPD_DRONE * 1.6) {
       this.vx = (this.vx/spd) * CFG.SPD_DRONE * 1.6;
@@ -531,13 +452,14 @@ class Drone extends Threat {
   }
   update(peers) {
     this.saveTrail();
-    this.vx = max(this.vx, 0.55);
+    this.vx = max(this.vx, 0.55); // always advance toward target
     this.applyBoids(peers);
     this.x += this.vx; this.y += this.vy;
     if (this.x > CFG.SIM_W+5 || this.y<-10 || this.y>CFG.SIM_H+10) this.alive=false;
   }
   draw() {
-    this.drawTrail(60, 255, 180);
+    // v2.0-C: Thinner trail for small drones
+    this.drawTrail(60, 255, 180, 1.5, 0.3);
     push();
     fill(60, 255, 180);
     noStroke();
@@ -546,51 +468,90 @@ class Drone extends Threat {
   }
 }
 
+// v2.0-D: Draw faint formation connector lines between nearby drones
+function drawDroneFormationLines(drones) {
+  const aliveDrones = drones.filter(d => d.alive);
+  for (let i = 0; i < aliveDrones.length; i++) {
+    for (let j = i + 1; j < aliveDrones.length; j++) {
+      const a = aliveDrones[i], b = aliveDrones[j];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const d = sqrt(dx * dx + dy * dy);
+      if (d < CFG.BOID_COH && d > 0) {
+        const alpha = map(d, 0, CFG.BOID_COH, 40, 0);
+        stroke(60, 255, 180, alpha);
+        strokeWeight(0.5);
+        line(a.x, a.y, b.x, b.y);
+      }
+    }
+  }
+}
+
 // ── INTERCEPTOR — PROPORTIONAL NAVIGATION GUIDANCE ────────────────────────────
+// PN is the standard guidance law used in virtually all modern SAMs (Patriot, THAAD, etc.)
+//
+// Guidance command: a_m = N · V_c · (dθ/dt)
+//   a_m   = acceleration commanded perpendicular to line-of-sight
+//   N     = navigation constant (CFG.PN_N = 4, tunable)
+//   V_c   = closing velocity (rate at which range decreases)
+//   dθ/dt = LOS (line-of-sight) angular rate
+//
+// Physical intuition: if LOS isn't rotating (dθ/dt = 0), both objects
+// are on a collision course — missile already aimed correctly. If LOS
+// is rotating, steer to cancel that rotation.
 class Interceptor {
   constructor(x, y, track) {
     this.x     = x; this.y = y;
-    this.track = track;
+    this.track = track;          // KalmanTrack to pursue (C2-assigned)
     this.vx    = 0;
-    this.vy    = -CFG.INT_SPEED;
+    this.vy    = -CFG.INT_SPEED; // initially launch straight up
     this.alive = true;
-    this.prevLOS = null;
+    this.prevLOS = null;          // needed to compute dθ/dt numerically
     this.trail = [];
     this.age   = 0;
+    this.isFast = false;          // visual flag (reserved for future fast-interceptor variant)
   }
   update() {
     this.age++;
     this.trail.push({ x: this.x, y: this.y });
     if (this.trail.length > 28) this.trail.shift();
 
-    const tp = this.track.pos;
+    const tp = this.track.pos; // Kalman-filtered target estimate
     const tv = this.track.vel;
 
+    // Relative position missile→target (line-of-sight vector)
     const rx = tp.x - this.x, ry = tp.y - this.y;
     const rMag = sqrt(rx*rx + ry*ry);
-    if (rMag < 0.5) return;
+    if (rMag < 0.5) return; // prevent division by zero at intercept
 
+    // LOS angle θ = atan2(ry, rx)
     const los = atan2(ry, rx);
 
+    // LOS rate dθ/dt ≈ Δθ per frame (numerical differentiation)
     let losRate = 0;
     if (this.prevLOS !== null) {
       let dTheta = los - this.prevLOS;
+      // Unwrap angle to [-π, π] to handle 0/2π boundary crossing
       if (dTheta >  PI) dTheta -= TWO_PI;
       if (dTheta < -PI) dTheta += TWO_PI;
       losRate = dTheta;
     }
     this.prevLOS = los;
 
+    // Closing velocity: V_c = −(relVel · LOS_unit)
+    // dot product of relative velocity with LOS unit vector
     const relVx = tv.x - this.vx, relVy = tv.y - this.vy;
     const losUx = rx / rMag,       losUy = ry / rMag;
     const Vc = -(relVx * losUx + relVy * losUy);
 
+    // PN command: a_m = N · V_c · dθ/dt  (perpendicular to LOS)
     const aMag  = CFG.PN_N * max(Vc, 0.5) * losRate;
     const aCmd  = constrain(aMag, -CFG.INT_MAX_ACCEL, CFG.INT_MAX_ACCEL);
 
+    // Perpendicular to LOS: rotate LOS unit 90°
     this.vx += aCmd * (-losUy);
     this.vy += aCmd * ( losUx);
 
+    // Maintain constant speed (SAMs use rocket boost, not coasting)
     const spd = sqrt(this.vx*this.vx + this.vy*this.vy);
     if (spd > 0.01) {
       this.vx = (this.vx/spd) * CFG.INT_SPEED;
@@ -598,14 +559,34 @@ class Interceptor {
     }
     this.x += this.vx; this.y += this.vy;
 
+    // Kill if out of sim bounds (missed)
     if (this.x<-30||this.x>CFG.SIM_W+30||this.y<-60||this.y>CFG.SIM_H+20) this.alive=false;
   }
   draw() {
+    // v2.0-C: Gradient-width trail + fuel-low flicker + fast inner glow
     noFill();
-    for (let i=1; i<this.trail.length; i++) {
-      stroke(0, 180, 255, map(i, 0, this.trail.length, 0, 210));
-      strokeWeight(1);
+    const fuelLow = this.age > CFG.INT_MAX_AGE * 0.7;
+    for (let i = 1; i < this.trail.length; i++) {
+      const t = i / this.trail.length;
+      const alpha = t * (this.isFast ? 230 : 210);
+      const w = lerp(0.4, this.isFast ? 2.5 : 2.0, t);
+      // Fuel-low flicker: random alpha drops
+      const flickerAlpha = fuelLow ? alpha * random(0.3, 1.0) : alpha;
+      if (this.isFast) {
+        stroke(0, 255, 255, flickerAlpha);
+      } else {
+        stroke(0, 180, 255, flickerAlpha);
+      }
+      strokeWeight(w);
       line(this.trail[i-1].x, this.trail[i-1].y, this.trail[i].x, this.trail[i].y);
+    }
+    // Fast interceptor inner glow line (bright white core)
+    if (this.isFast && this.trail.length > 2) {
+      for (let i = this.trail.length - 4; i < this.trail.length && i > 0; i++) {
+        stroke(255, 255, 255, 80);
+        strokeWeight(0.8);
+        line(this.trail[i-1].x, this.trail[i-1].y, this.trail[i].x, this.trail[i].y);
+      }
     }
     push();
     translate(this.x, this.y);
@@ -636,33 +617,32 @@ function boom(x, y, r=255, g=160, b=40, n=28) {
 }
 
 // ── GAME STATE ────────────────────────────────────────────────────────────────
-let threats, interceptors, particles, radars, ewRadar;
+let threats, interceptors, particles, radars;
 let score, lastWave, gameOver, log;
 
 // ── C2 — COMMAND & CONTROL (GREEDY INTERCEPTOR ASSIGNMENT) ───────────────────
+// Strategy: for every confirmed radar track not yet engaged, launch one interceptor.
+// "Greedy" = prioritize closest confirmed threats; not optimal but realistic for Phase 1.
+// Phase 2 will add auction-based assignment to handle saturation attacks.
 function runC2() {
-  // Merge tracks from all radars (ground + EW) into a single threat→KF map
-  const allTracks = new Map();
+  // Merge tracks from all radars into a single threat→KF map
+  const allTracks = new Map(); // threatId → KalmanTrack
   for (const r of radars) {
     for (const [id, kf] of r.tracks) {
       if (!allTracks.has(id)) allTracks.set(id, kf);
     }
   }
-  // Include EW radar tracks in C2 picture
-  if (ewRadar) {
-    for (const [id, kf] of ewRadar.tracks) {
-      if (!allTracks.has(id)) allTracks.set(id, kf);
-    }
-  }
-
+  // Collect KF objects already being chased by active interceptors
   const engaged = new Set(interceptors.filter(i => i.alive).map(i => i.track));
 
   for (const [id, kf] of allTracks) {
     const threat = threats.find(t => t.id === id && t.alive);
     if (!threat) continue;
     if (engaged.has(kf)) continue;
+    // Only engage threats that have crossed 25% of the range (confirmed inbound)
     if (kf.pos.x < CFG.SIM_W * 0.25) continue;
 
+    // Launch from interceptor battery
     const lx = CFG.BATT_X_FRAC * CFG.SIM_W;
     interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, kf));
     score.shots++;
@@ -709,20 +689,19 @@ function checkCollisions() {
       if (!t.alive) continue;
       const dx = inter.x - t.x, dy = inter.y - t.y;
       if (sqrt(dx*dx+dy*dy) < CFG.KILL_RADIUS) {
-        boom(t.x, t.y, 255, 180, 40);
+        boom(t.x, t.y, 255, 180, 40); // gold intercept explosion
         t.alive = false;
         inter.alive = false;
         score.kills++;
         addLog(`★ INTERCEPT  ${t.type}`);
         for (const r of radars) r.tracks.delete(t.id);
-        if (ewRadar) ewRadar.tracks.delete(t.id);
       }
     }
   }
   for (const t of threats) {
     if (!t.alive) continue;
-    if (t.x > CFG.SIM_W - 3) {
-      boom(t.x, t.y, 255, 40, 40, 40);
+    if (t.x > CFG.SIM_W - 3) { // reached protected zone
+      boom(t.x, t.y, 255, 40, 40, 40); // red impact explosion
       boom(t.x, t.y-10, 255, 100, 0, 20);
       t.alive = false;
       score.leak++;
@@ -735,30 +714,36 @@ function checkCollisions() {
 // ── DRAW GRID ─────────────────────────────────────────────────────────────────
 function drawGrid() {
   push(); strokeWeight(1);
+  // Range gridlines (vertical)
   for (let km=0; km<=CFG.RANGE_KM; km+=100) {
     const x = (km/CFG.RANGE_KM) * CFG.SIM_W;
     stroke(0, 60, 18); line(x, 0, x, CFG.SIM_H);
     fill(0, 120, 45); noStroke(); textSize(8); textAlign(CENTER);
     text(`${km}`, x, CFG.SIM_H - 3);
   }
+  // Altitude gridlines (horizontal)
   for (let km=0; km<=CFG.ALT_KM; km+=20) {
     const y = CFG.SIM_H - (km/CFG.ALT_KM) * CFG.SIM_H;
     stroke(0, 60, 18); line(0, y, CFG.SIM_W, y);
     fill(0, 110, 40); noStroke(); textSize(8); textAlign(LEFT);
     text(`${km}km`, 3, y - 2);
   }
+  // Axis labels
   fill(0, 100, 38); textSize(8); textAlign(CENTER);
   text('RANGE (km)', CFG.SIM_W * 0.45, CFG.SIM_H - 3);
 
+  // Threat entry annotation
   fill(255, 60, 60, 100); textSize(8); textAlign(LEFT);
   text('◀ THREAT ENTRY', 6, 12);
 
+  // Protected zone shading
   fill(0, 80, 200, 18); noStroke();
   rect(CFG.SIM_W * 0.84, 0, CFG.SIM_W * 0.16, CFG.SIM_H);
   fill(0, 160, 255, 120); textSize(9); textAlign(CENTER);
   text('DEFENDED', CFG.SIM_W * 0.92, 20);
   text('ZONE', CFG.SIM_W * 0.92, 31);
 
+  // Ground line
   stroke(0, 200, 60, 160); strokeWeight(2);
   line(0, CFG.SIM_H, CFG.SIM_W, CFG.SIM_H);
   pop();
@@ -772,21 +757,9 @@ function drawTracks() {
       noFill();
       stroke(0, 255, 65, 150);
       strokeWeight(1);
-      line(x-7,y, x+7,y); line(x,y-7, x,y+7);
+      line(x-7,y, x+7,y); line(x,y-7, x,y+7); // crosshair
       stroke(0, 255, 65, 50);
-      ellipse(x, y, 22, 22);
-    }
-  }
-  // Also draw EW radar tracks (orange tint)
-  if (ewRadar) {
-    for (const [, kf] of ewRadar.tracks) {
-      const { x, y } = kf.pos;
-      noFill();
-      stroke(255, 160, 30, 120);
-      strokeWeight(1);
-      line(x-6,y, x+6,y); line(x,y-6, x,y+6);
-      stroke(255, 160, 30, 35);
-      ellipse(x, y, 20, 20);
+      ellipse(x, y, 22, 22); // uncertainty circle
     }
   }
 }
@@ -796,7 +769,9 @@ function drawBattery() {
   const bx = CFG.BATT_X_FRAC * CFG.SIM_W;
   push();
   fill(0, 160, 255); noStroke();
+  // Square launcher pad symbol
   rect(bx - 8, CFG.SIM_H - 14, 16, 12, 2);
+  // Launcher rail lines
   stroke(0, 220, 255); strokeWeight(1.5);
   line(bx - 5, CFG.SIM_H - 14, bx - 5, CFG.SIM_H - 22);
   line(bx,     CFG.SIM_H - 14, bx,     CFG.SIM_H - 24);
@@ -811,15 +786,18 @@ function drawPanel() {
   const px = CFG.SIM_W + 12;
   const pw = CFG.W - CFG.SIM_W;
   push();
+  // Panel background
   fill(2, 10, 4); noStroke(); rect(CFG.SIM_W, 0, pw, CFG.H);
   stroke(0, 120, 40, 100); strokeWeight(1); line(CFG.SIM_W, 0, CFG.SIM_W, CFG.H);
 
+  // ── Title block
   fill(0, 255, 65); noStroke(); textSize(11); textAlign(LEFT);
   text('◈ IAMD COMMAND', px, 22);
   fill(0, 120, 50); textSize(8);
   text('2D RANGE-HEIGHT DISPLAY', px, 33);
   stroke(0, 90, 35); line(px, 37, CFG.W-8, 37);
 
+  // ── Score block
   let y = 52;
   const statLine = (label, val, vr=0, vg=255, vb=65) => {
     fill(0, 120, 45); textSize(9); textAlign(LEFT); text(label, px, y);
@@ -835,6 +813,7 @@ function drawPanel() {
   const pct = tot > 0 ? floor((score.kills/tot)*100) : 100;
   statLine('KILL RATE',   `${pct}%`, pct>70 ? 0 : 255, pct>70 ? 255 : 80, pct>70 ? 65 : 80);
 
+  // ── System params
   y += 4; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
   fill(0, 160, 55); textSize(9); text('── SYS PARAMS ──', px, y); y += 13;
   fill(0, 110, 42); textSize(8);
@@ -845,6 +824,7 @@ function drawPanel() {
   param('Wave period  ', `${CFG.WAVE_MS/1000}s`);
   param('INT speed    ', `${CFG.INT_SPEED}px/f`);
 
+  // ── Legend
   y += 4; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
   fill(0, 160, 55); textSize(9); text('── LEGEND ──', px, y); y += 13;
   const leg = [
@@ -854,12 +834,12 @@ function drawPanel() {
     [[60,255,180], '▶ Drone swarm'],
     [[0,210,255],  '◁ Interceptor (PN)'],
     [[0,255,65],   '◎ Radar + track'],
-    [[255,160,30], '◇ EW Radar (early warn)'],
   ];
   for (const [c, l] of leg) {
     fill(...c); noStroke(); textSize(8); text(l, px, y); y += 11;
   }
 
+  // ── Event log
   y += 5; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
   fill(0, 155, 55); textSize(9); text('── EVENT LOG ──', px, y); y += 12;
   for (const m of log) {
@@ -869,6 +849,7 @@ function drawPanel() {
   }
   log = log.filter(m => m.age < 300);
 
+  // ── Controls hint
   stroke(0, 60, 25); line(px, CFG.H-38, CFG.W-8, CFG.H-38);
   fill(0, 90, 38); textSize(7.5); noStroke();
   text('[R] Restart  [+/-] Wave speed', px, CFG.H-26);
@@ -897,21 +878,18 @@ function initGame() {
   threats     = [];
   interceptors= [];
   particles   = [];
-  // Three ground radars placed at different downrange positions for overlapping coverage
+  // Three radars placed at different downrange positions for overlapping coverage
   radars = [
     new Radar(0.33, 0),
     new Radar(0.58, 1),
     new Radar(0.78, 2),
   ];
-  // EW Radar: elevated early-warning radar near center of defended area
-  ewRadar = new EWRadar(0.52, 0.65); // positioned at ~52% range, ~35% altitude (elevated site)
   score       = { wave: 0, kills: 0, leak: 0, shots: 0 };
   log         = [];
   gameOver    = false;
   lastWave    = millis();
   addLog('SYSTEM NOMINAL — AWAITING THREATS');
   addLog('SAM BATTERY ONLINE');
-  addLog('EW RADAR ONLINE — 360° COVERAGE');
 }
 
 // ── P5.JS ENTRY POINTS ────────────────────────────────────────────────────────
@@ -922,14 +900,16 @@ function setup() {
 }
 
 function draw() {
-  background(4, 10, 4);
+  background(4, 10, 4); // deep phosphor-green-tinted black
   drawGrid();
 
+  // ── Wave spawning timer
   if (!gameOver && millis() - lastWave > CFG.WAVE_MS) {
     spawnWave();
     lastWave = millis();
   }
 
+  // ── Threat updates
   const liveDrones = threats.filter(t => t.type==='DRONE' && t.alive);
   for (const t of threats) {
     if (!t.alive) continue;
@@ -938,29 +918,34 @@ function draw() {
   }
   threats = threats.filter(t => t.alive);
 
-  // Radar tracking (detect + Kalman predict/update) — ground radars + EW radar
+  // ── Radar tracking (detect + Kalman predict/update)
   const liveThreats = threats.filter(t => t.alive);
   for (const r of radars) r.update(liveThreats);
-  if (ewRadar) ewRadar.update(liveThreats);
 
+  // ── C2 interceptor assignment (checked every 30 frames ≈ 0.5s)
   if (!gameOver && frameCount % 30 === 0) runC2();
 
+  // ── Interceptor updates (PN guidance)
   for (const i of interceptors) if (i.alive) i.update();
   interceptors = interceptors.filter(i => i.alive);
 
+  // ── Outcome check
   if (!gameOver) checkCollisions();
 
+  // ── Particle update + draw
   for (const p of particles) { p.update(); p.draw(); }
   particles = particles.filter(p => !p.dead);
 
-  // Draw scene elements (order: EW radar behind, then threats, interceptors, ground radars, overlays)
-  if (ewRadar) ewRadar.draw();
+  // ── Draw scene elements (order: trails, bodies, overlays)
   for (const t of threats) if (t.alive) t.draw();
+  // v2.0-D: Formation connector lines for drone swarms
+  drawDroneFormationLines(threats.filter(t => t.type === 'DRONE'));
   for (const i of interceptors) if (i.alive) i.draw();
   for (const r of radars) r.draw();
   drawBattery();
   drawTracks();
 
+  // ── HUD + panel
   drawPanel();
   if (gameOver) drawGameOver();
 }
@@ -972,6 +957,7 @@ function keyPressed() {
   if (key === '2') { spawnWave('cruise');    }
   if (key === '3') { spawnWave('hypersonic');}
   if (key === '4') { spawnWave('drone');     }
+  // Tune wave tempo (+/- keys)
   if (key === '=' || key === '+') CFG.WAVE_MS = max(2000, CFG.WAVE_MS - 1000);
   if (key === '-' || key === '_') CFG.WAVE_MS = min(30000, CFG.WAVE_MS + 1000);
 }
