@@ -213,6 +213,7 @@ class KF1D {
     this.Pp = newPp; this.Pxv = newPxv; this.Pv = newPv;
     // FIX MEDIUM-1: Floor Pp to prevent negative covariance & clamp Pxv to valid correlation bound
     this.Pp = Math.max(this.Pp, 0.01);
+    this.Pv = Math.max(this.Pv, 0.01);  // FIX MEDIUM-1: floor Pv in predict() for full positive-definite covariance protection
     this.Pxv = Math.max(-Math.sqrt(this.Pp * this.Pv), Math.min(this.Pxv, Math.sqrt(this.Pp * this.Pv)));
     // FIX MED-3: Cap covariance growth during sparse-measurement periods
     this.Pp = min(this.Pp, 5000);
@@ -733,6 +734,7 @@ class Interceptor {
   constructor(x, y, track, isFast = false) {
     this.x     = x; this.y = y;
     this.track = track;          // KalmanTrack to pursue (C2-assigned)
+    this.trackId = (track && track.id !== undefined) ? track.id : null;  // FIX LOW-2: store ID at launch; immune to track pruning
     this.isFast = isFast;        // IMPROVED: fast interceptor flag
 
     // IMPROVED: select speed/agility based on interceptor type
@@ -788,7 +790,7 @@ class Interceptor {
     this.age++;
     if (this.age > CFG.INT_MAX_AGE) { this.alive = false; return; }
     this.trail.push({ x: this.x, y: this.y });
-    if (this.trail.length > 28) this.trail.shift();
+    if (this.trail.length >= 28) this.trail.shift();  // FIX LOW-1: consistent cap (was >28, allowed 29 entries transiently)
 
     const tp = this.track.pos; // Kalman-filtered target estimate
     const tv = this.track.vel;
@@ -1034,14 +1036,12 @@ function runC2() {
   // same threat, object-reference equality fails → duplicate launches. Using
   // threat ID eliminates the ambiguity.
   const allRadarsList = [...radars, ewRadar];
-  const engagedIds = new Set(interceptors.filter(i => i.alive).map(i => {
-    for (const r of allRadarsList) {
-      for (const [id, kf] of r.tracks) {
-        if (kf === i.track) return id;
-      }
-    }
-    return null;
-  }).filter(id => id !== null));
+  // FIX LOW-2: Use stored trackId instead of fragile reverse-lookup through radar maps.
+  // When a radar prunes a fading track, i.track is gone from r.tracks → old lookup returned null
+  // → C2 saw threat as unengaged → double-launch. Direct trackId stored at construction is immune.
+  const engagedIds = new Set(
+    interceptors.filter(i => i.alive && i.trackId !== null).map(i => i.trackId)
+  );
 
   // IMPROVED: Build prioritized list — fast movers first
   const candidates = [];
