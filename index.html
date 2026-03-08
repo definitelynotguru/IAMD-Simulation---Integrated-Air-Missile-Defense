@@ -138,43 +138,92 @@ const CFG = {
   KALMAN_Q: 0.03,         // process noise covariance (model uncertainty)
   KALMAN_R: 9.0,          // measurement noise covariance (radar error)
 
-  // Interceptors — Proportional Navigation constants
-  PN_N: 4,                // navigation constant (3–5 typical; 4 = standard military)
-  INT_SPEED: 7.5,         // px/frame (≈ Mach 4–5 scaled) — standard PAC-3 class
-  INT_MAX_ACCEL: 1.3,     // px/frame² maneuver limit
+  // Interceptors — legacy values retained for compatibility with existing HUD strings
+  PN_N: 4,
+  INT_SPEED: 7.5,
+  INT_MAX_ACCEL: 1.3,
+  FAST_INT_SPEED: 10.5,
+  FAST_INT_MAX_ACCEL: 1.0,
+  FAST_INT_PN_N: 5,
+  HYPERSONIC_SPD_THRESH: 5.5,
 
-  // IMPROVED: Fast interceptor for hypersonic threats (THAAD-class)
-  FAST_INT_SPEED: 10.5,       // px/frame (≈ Mach 8 scaled) — fast enough to catch HGVs
-  FAST_INT_MAX_ACCEL: 1.0,    // slightly less agile (heavier booster) but faster
-  FAST_INT_PN_N: 5,           // more aggressive PN constant for fast-closing engagements
-  HYPERSONIC_SPD_THRESH: 5.5, // speed threshold to classify as "hypersonic" for C2
-
-  KILL_RADIUS: 24,        // IMPROVED v1.3: larger proximity fuze (was 16) to prevent fast-closing overshoot        // px proximity fuze radius (≈ 400 m scaled)
+  KILL_RADIUS: 24,
   INT_MAX_AGE: 300,       // interceptor self-destructs after 300 frames (~5s) if no hit
 
+  // Layered defense doctrine — three engagement tiers with per-tier performance and inventory
+  INT_TIERS: {
+    UPPER: {
+      key: 'UPPER',
+      label: 'UPPER',
+      zoneLabel: 'HIMEZ',
+      color: [255, 110, 110],
+      trailColor: [255, 90, 90, 130],
+      speed: 14.0,
+      accelMax: 0.25,
+      navConst: 3.5,
+      sspk: 0.80,
+      magazine: 8,
+      killRadius: 30,
+      engageYMinFrac: 0.00,
+      engageYMaxFrac: 0.35,
+    },
+    MIDDLE: {
+      key: 'MIDDLE',
+      label: 'MIDDLE',
+      zoneLabel: 'LOMEZ',
+      color: [100, 210, 255],
+      trailColor: [100, 210, 255, 125],
+      speed: 10.0,
+      accelMax: 0.45,
+      navConst: 4.0,
+      sspk: 0.68,
+      magazine: 14,
+      killRadius: 22,
+      engageYMinFrac: 0.35,
+      engageYMaxFrac: 0.68,
+    },
+    LOWER: {
+      key: 'LOWER',
+      label: 'LOWER',
+      zoneLabel: 'SHORADEZ',
+      color: [120, 255, 160],
+      trailColor: [120, 255, 160, 120],
+      speed: 8.2,
+      accelMax: 0.75,
+      navConst: 4.6,
+      sspk: 0.52,
+      magazine: 20,
+      killRadius: 16,
+      engageYMinFrac: 0.68,
+      engageYMaxFrac: 1.00,
+    },
+  },
+  TIER_ORDER: ['UPPER', 'MIDDLE', 'LOWER'],
+  SLS_ASSESS_DELAY: 24,       // frames to wait after an intercept attempt before re-engaging down a layer
+
   // Threat speeds (px/frame — faster = harder to intercept)
-  SPD_BALLISTIC:  3.2,    // Mach ~3 (terminal descent leg)
-  SPD_CRUISE:     1.8,    // Mach ~0.9 subsonic
-  SPD_HYPERSONIC: 6.8,    // Mach ~10 HGV — very hard to kill
-  SPD_DRONE:      1.3,    // slow UAS swarm
+  SPD_BALLISTIC:  3.2,
+  SPD_CRUISE:     1.8,
+  SPD_HYPERSONIC: 6.8,
+  SPD_DRONE:      1.3,
 
   // Boids parameters for drone swarm AI
-  BOID_SEP: 22,           // separation radius: drones repel within this range
-  BOID_ALIGN: 50,         // alignment radius: match flock velocity
-  BOID_COH: 60,           // cohesion radius: move toward group centroid
+  BOID_SEP: 22,
+  BOID_ALIGN: 50,
+  BOID_COH: 60,
 
   // Game pacing
-  WAVE_MS: 9000,          // ms between automatic threat waves
-  MAX_LEAKAGE: 10,        // leakage hits before game over (increased from 5 for longer survival)
+  WAVE_MS: 9000,
+  MAX_LEAKAGE: 10,
 
   // Interceptor battery position (right side, protected zone)
   BATT_X_FRAC: 0.87,
 
-  // IMPROVED: C2 engagement timing
-  C2_STD_COOLDOWN: 30,        // frames between C2 checks for standard threats
-  C2_FAST_COOLDOWN: 10,       // frames between C2 checks for hypersonic (shoot early!)
-  C2_ENGAGE_RANGE_FRAC: 0.25, // standard: engage after 25% of range crossed
-  C2_EARLY_ENGAGE_FRAC: 0.12, // hypersonic: engage much earlier (12% range crossed)
+  // C2 timing
+  C2_STD_COOLDOWN: 20,
+  C2_FAST_COOLDOWN: 10,
+  C2_ENGAGE_RANGE_FRAC: 0.18,
+  C2_EARLY_ENGAGE_FRAC: 0.10,
 };
 
 // ── WORLD ↔ CANVAS COORDINATE TRANSFORMS ─────────────────────────────────────
@@ -731,46 +780,37 @@ class Drone extends Threat {
 // IMPROVED v1.1: Now supports two modes — standard (PAC-3 class) and
 // fast (THAAD class) for hypersonic threat engagement.
 class Interceptor {
-  constructor(x, y, track, isFast = false) {
+  constructor(x, y, track, tierKey) {
     this.x     = x; this.y = y;
-    this.track = track;          // KalmanTrack to pursue (C2-assigned)
-    this.trackId = (track && track.id !== undefined) ? track.id : null;  // FIX LOW-2: store ID at launch; immune to track pruning
-    this.isFast = isFast;        // IMPROVED: fast interceptor flag
+    this.track = track;
+    this.trackId = (track && track.id !== undefined) ? track.id : null;
+    this.tierKey = tierKey;
+    this.tier = CFG.INT_TIERS[tierKey] || CFG.INT_TIERS.MIDDLE;
+    this.speed = this.tier.speed;
+    this.maxAccel = this.tier.accelMax;
+    this.navConst = this.tier.navConst;
+    this.killRadius = this.tier.killRadius;
+    this.sspk = this.tier.sspk;
+    this.color = this.tier.color;
+    this.trailColor = this.tier.trailColor;
 
-    // IMPROVED: select speed/agility based on interceptor type
-    this.speed    = isFast ? CFG.FAST_INT_SPEED : CFG.INT_SPEED;
-    this.maxAccel = isFast ? CFG.FAST_INT_MAX_ACCEL : CFG.INT_MAX_ACCEL;
-    this.navConst = isFast ? CFG.FAST_INT_PN_N : CFG.PN_N;
-
-    // IMPROVED v1.3: Launch TOWARD the predicted intercept point instead of straight up.
-    // Estimate where the target will be in ~T frames (simple lead calculation).
     const tp = track.pos;
     const tv = track.vel;
     const dx = tp.x - x;
     const dy = tp.y - y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    // Estimate time-to-intercept: distance / interceptor speed
     const tEst = dist / this.speed;
-    // Predicted intercept point (linear extrapolation of target motion)
-    const px = tp.x + tv.x * tEst * 0.6; // 0.6 damping — don't fully lead, let PN correct
+    const px = tp.x + tv.x * tEst * 0.6;
     const py = tp.y + tv.y * tEst * 0.6;
-    // Aim vector from launch point to predicted intercept
     const aimDx = px - x;
     const aimDy = py - y;
     const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy);
     let aim = Math.atan2(aimDy, aimDx);
-    // FIX HIGH-3: Clamp interceptor launch angle to valid upward-leftward range.
-    // atan2 returns [-PI, PI] so `aim < -Math.PI` was dead code — replaced with
-    // a symmetric guard that handles both extremes of the valid range.
-    // Valid range: -PI*0.98 (almost hard-left) to -PI*0.15 (nearly straight up).
-    // If outside this range, fall back to direct aim at threat, then to 45deg up-left.
     if (aim > -Math.PI * 0.15 || aim < -Math.PI * 0.98) {
-        // Default to aiming at the threat's current position instead
-        aim = Math.atan2(tp.y - y, tp.x - x);
-        // If STILL not leftward-upward, force a default ~45deg up-left
-        if (aim > -Math.PI * 0.15 || aim < -Math.PI * 0.98) {
-            aim = -Math.PI * 0.75; // 135 degrees = up-left at 45deg
-        }
+      aim = Math.atan2(tp.y - y, tp.x - x);
+      if (aim > -Math.PI * 0.15 || aim < -Math.PI * 0.98) {
+        aim = -Math.PI * 0.75;
+      }
     }
     if (aimDist > 0.1) {
       this.vx = Math.cos(aim) * this.speed;
@@ -782,7 +822,7 @@ class Interceptor {
     this.alive = true;
     this.prevX = x;
     this.prevY = y;
-    this.prevLOS = null;          // needed to compute dθ/dt numerically
+    this.prevLOS = null;
     this.trail = [];
     this.age   = 0;
   }
@@ -790,75 +830,49 @@ class Interceptor {
     this.age++;
     if (this.age > CFG.INT_MAX_AGE) { this.alive = false; return; }
     this.trail.push({ x: this.x, y: this.y });
-    if (this.trail.length >= 28) this.trail.shift();  // FIX LOW-1: consistent cap (was >28, allowed 29 entries transiently)
+    if (this.trail.length >= 28) this.trail.shift();
 
-    const tp = this.track.pos; // Kalman-filtered target estimate
+    const tp = this.track.pos;
     const tv = this.track.vel;
-
-    // Relative position missile→target (line-of-sight vector)
     const rx = tp.x - this.x, ry = tp.y - this.y;
     const rMag = sqrt(rx*rx + ry*ry);
-
-    // FIX MED-2: Compute LOS and update prevLOS BEFORE the rMag guard.
-    // Previously the guard returned early and skipped the prevLOS update,
-    // so the NEXT frame computed losRate over 2 frames — doubling the rate
-    // and firing a large spurious lateral command at terminal approach.
     const los = atan2(ry, rx);
 
-    // LOS rate dθ/dt ≈ Δθ per frame (numerical differentiation)
     let losRate = 0;
     if (this.prevLOS !== null) {
       let dTheta = los - this.prevLOS;
-      // Unwrap angle to [-π, π] to handle 0/2π boundary crossing
       if (dTheta >  PI) dTheta -= TWO_PI;
       if (dTheta < -PI) dTheta += TWO_PI;
       losRate = dTheta;
     }
-    this.prevLOS = los; // always updated — even before early-return below
+    this.prevLOS = los;
 
-    if (rMag < 0.5) return; // prevent division by zero at intercept
+    if (rMag < 0.5) return;
 
-    // Closing velocity: V_c = −(relVel · LOS_unit)
-    // dot product of relative velocity with LOS unit vector
     const relVx = tv.x - this.vx, relVy = tv.y - this.vy;
     const losUx = rx / rMag,       losUy = ry / rMag;
     const Vc = -(relVx * losUx + relVy * losUy);
-
-    // PN command: a_m = N · V_c · dθ/dt  (perpendicular to LOS)
-    // IMPROVED: use per-interceptor navConst and maxAccel
-    // FIX HIGH-1: Use abs(Vc) so negative closing velocity (interceptor
-    // momentarily diverging) does NOT invert the lateral acceleration.
-    // losRate sign still drives the correct perpendicular direction.
-    // Old max(Vc,1.0) discarded negative Vc — causing terminal misses.
     const clampedVc = max(abs(Vc), 0.5);
     const aMag  = this.navConst * clampedVc * losRate;
     const aCmd  = constrain(aMag, -this.maxAccel, this.maxAccel);
 
-    // Perpendicular to LOS: rotate LOS unit 90°
     this.vx += aCmd * (-losUy);
     this.vy += aCmd * ( losUx);
 
-    // Maintain constant speed (SAMs use rocket boost, not coasting)
     const spd = sqrt(this.vx*this.vx + this.vy*this.vy);
     if (spd > 0.01) {
       this.vx = (this.vx/spd) * this.speed;
       this.vy = (this.vy/spd) * this.speed;
     }
-    // FIX MEDIUM-2: NaN guard moved BEFORE position update — check velocity
-    // first so non-finite values never propagate into position coordinates.
     if (!isFinite(this.vx) || !isFinite(this.vy)) {
       this.alive = false; return;
     }
     this.prevX = this.x;
     this.prevY = this.y;
     this.x += this.vx; this.y += this.vy;
-
-    // Secondary guard: catch any position NaN from accumulated drift
     if (!isFinite(this.x) || !isFinite(this.y)) {
       this.alive = false; return;
     }
-
-    // Kill if out of sim bounds (missed)
     if (this.x<-30||this.x>CFG.SIM_W+30||this.y<-60||this.y>CFG.SIM_H+20) this.alive=false;
   }
   draw() {
@@ -866,19 +880,14 @@ class Interceptor {
     const fuelLow = this.age > CFG.INT_MAX_AGE * 0.7;
     for (let i = 1; i < this.trail.length; i++) {
       const t = i / this.trail.length;
-      const alpha = t * (this.isFast ? 230 : 210);
-      const w = lerp(0.4, this.isFast ? 2.5 : 2.0, t);
+      const alpha = t * 225;
+      const w = lerp(0.4, this.tierKey === 'UPPER' ? 2.7 : this.tierKey === 'MIDDLE' ? 2.2 : 1.8, t);
       const flickerAlpha = fuelLow ? alpha * random(0.3, 1.0) : alpha;
-      if (this.isFast) {
-        stroke(0, 255, 255, flickerAlpha);
-      } else {
-        stroke(0, 180, 255, flickerAlpha);
-      }
+      stroke(this.trailColor[0], this.trailColor[1], this.trailColor[2], min(255, flickerAlpha));
       strokeWeight(w);
       line(this.trail[i-1].x, this.trail[i-1].y, this.trail[i].x, this.trail[i].y);
     }
-    // v2.0: Fast interceptor white inner glow (last 4 trail segments)
-    if (this.isFast && this.trail.length > 2) {
+    if (this.tierKey === 'UPPER' && this.trail.length > 2) {
       for (let i = max(1, this.trail.length - 4); i < this.trail.length; i++) {
         stroke(255, 255, 255, 80);
         strokeWeight(0.8);
@@ -888,17 +897,18 @@ class Interceptor {
     push();
     translate(this.x, this.y);
     rotate(atan2(this.vy, this.vx));
-    // v1.4 body drawing preserved: fast interceptor is cyan with engine glow
-    if (this.isFast) {
-      fill(0, 255, 255);
-      noStroke();
+    fill(this.color[0], this.color[1], this.color[2]);
+    noStroke();
+    if (this.tierKey === 'UPPER') {
       triangle(-6, -3, -6, 3, 10, 0);
-      fill(255, 255, 255, 140);
+      fill(255, 255, 255, 120);
       ellipse(-7, 0, 4, 3);
-    } else {
-      fill(0, 210, 255);
-      noStroke();
+    } else if (this.tierKey === 'MIDDLE') {
       triangle(-5, -2.5, -5, 2.5, 8, 0);
+    } else {
+      triangle(-4.5, -2.2, -4.5, 2.2, 7, 0);
+      fill(255, 255, 255, 110);
+      ellipse(-5.2, 0, 2.5, 2.2);
     }
     pop();
   }
@@ -1000,10 +1010,10 @@ function boom(x, y, r = 255, g = 160, b = 40, n = 28, threatType = null) {
 // ── GAME STATE ────────────────────────────────────────────────────────────────
 let threats, interceptors, particles, radars, ewRadar;
 let score, lastWave, gameOver, log;
-let killFeed = [];       // v2.0: compact kill feed for HUD
-let screenShake = 0;     // v2.0: screen shake frames remaining
-// IMPROVED: track last C2 run frame for adaptive cooldown
+let killFeed = [];
+let screenShake = 0;
 let lastC2Frame = 0;
+let slsState = new Map();
 
 // ── C2 — COMMAND & CONTROL (PRIORITY-BASED INTERCEPTOR ASSIGNMENT) ───────────
 // IMPROVED v1.1: Complete rewrite for HGV balance.
@@ -1014,84 +1024,105 @@ let lastC2Frame = 0;
 //   4. Launch fast interceptors (THAAD-class) for hypersonic tracks
 //   5. Launch standard interceptors (PAC-3 class) for everything else
 //   6. Adaptive cooldown: check for fast movers more frequently
+function getThreatAltitudeBand(y) {
+  if (y <= CFG.SIM_H * CFG.INT_TIERS.UPPER.engageYMaxFrac) return 'UPPER';
+  if (y <= CFG.SIM_H * CFG.INT_TIERS.MIDDLE.engageYMaxFrac) return 'MIDDLE';
+  return 'LOWER';
+}
+
+function getTierColor(tierKey) {
+  const tier = CFG.INT_TIERS[tierKey] || CFG.INT_TIERS.MIDDLE;
+  return tier.color;
+}
+
+function ensureTrackAssessment(id) {
+  if (!slsState.has(id)) {
+    slsState.set(id, { currentTierIndex: null, waitingUntil: 0, attempts: 0, reengageCount: 0 });
+  }
+  return slsState.get(id);
+}
+
+function launchTierInterceptor(kf, threat, tierKey, isReengage = false) {
+  const tier = CFG.INT_TIERS[tierKey];
+  if (!tier || score.magazines[tierKey] <= 0) return false;
+  const lx = CFG.BATT_X_FRAC * CFG.SIM_W;
+  interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, kf, tierKey));
+  score.shots++;
+  score.magazines[tierKey]--;
+  score.tierStats[tierKey].fire++;
+  const assessment = ensureTrackAssessment(threat.id);
+  assessment.waitingUntil = frameCount + CFG.SLS_ASSESS_DELAY;
+  const tierIndex = CFG.TIER_ORDER.indexOf(tierKey);
+  assessment.currentTierIndex = tierIndex;
+  assessment.attempts++;
+  if (isReengage) {
+    assessment.reengageCount++;
+    score.slsReengage++;
+    addLog(`SLS ▶ ${tierKey} RE-ENGAGE [${threat.type}]`);
+  } else {
+    addLog(`C2 ▶ ${tierKey} FIRE [${threat.type}]`);
+  }
+  return true;
+}
+
 function runC2() {
-  // Merge tracks from all radars (ground + EW) into a single threat→KF map
-  const allTracks = new Map(); // threatId → KalmanTrack
-  // FIX MEDIUM-3: Prefer the most mature (highest age) KalmanTrack for each
-  // threat across all radars. Previously first-seen won, which could give a
-  // less-settled ground radar KF priority over a better EW radar KF.
+  const allTracks = new Map();
   for (const r of radars) {
     for (const [id, kf] of r.tracks) {
-      if (!allTracks.has(id) || kf.age > allTracks.get(id).age)
-        allTracks.set(id, kf);
+      if (!allTracks.has(id) || kf.age > allTracks.get(id).age) allTracks.set(id, kf);
     }
   }
-  // IMPROVED v1.2: also merge EW radar tracks (critical for high-altitude HGVs)
   for (const [id, kf] of ewRadar.tracks) {
-    if (!allTracks.has(id) || kf.age > allTracks.get(id).age)
-      allTracks.set(id, kf);
+    if (!allTracks.has(id) || kf.age > allTracks.get(id).age) allTracks.set(id, kf);
   }
-  // FIX MED-4: Track engagement by threat ID instead of KF object reference
-  // When ground radar and EW radar create separate KalmanTrack objects for the
-  // same threat, object-reference equality fails → duplicate launches. Using
-  // threat ID eliminates the ambiguity.
-  const allRadarsList = [...radars, ewRadar];
-  // FIX LOW-2: Use stored trackId instead of fragile reverse-lookup through radar maps.
-  // When a radar prunes a fading track, i.track is gone from r.tracks → old lookup returned null
-  // → C2 saw threat as unengaged → double-launch. Direct trackId stored at construction is immune.
-  const engagedIds = new Set(
-    interceptors.filter(i => i.alive && i.trackId !== null).map(i => i.trackId)
-  );
 
-  // IMPROVED: Build prioritized list — fast movers first
+  const engagedIds = new Set(interceptors.filter(i => i.alive && i.trackId !== null).map(i => i.trackId));
+  const liveThreatIds = new Set(threats.filter(t => t.alive).map(t => t.id));
+  for (const id of [...slsState.keys()]) {
+    if (!liveThreatIds.has(id)) slsState.delete(id);
+  }
+
   const candidates = [];
   for (const [id, kf] of allTracks) {
     const threat = threats.find(t => t.id === id && t.alive);
     if (!threat) continue;
     if (engagedIds.has(id)) continue;
 
-    // Estimate track speed from Kalman velocity
     const estSpeed = kf.speed;
     const isHypersonic = estSpeed > CFG.HYPERSONIC_SPD_THRESH;
-
-    // IMPROVED: Different engagement range thresholds
-    // Hypersonic: engage as soon as 12% range crossed (early cueing)
-    // Standard: engage after 25% range crossed (confirmed inbound)
     const engageThresh = isHypersonic ? CFG.C2_EARLY_ENGAGE_FRAC : CFG.C2_ENGAGE_RANGE_FRAC;
     if (kf.pos.x < CFG.SIM_W * engageThresh) continue;
-    if (kf.pos.x > CFG.BATT_X_FRAC * CFG.SIM_W) continue; // threat already past battery, don't waste interceptor
-    // FIX MEDIUM-2: Reduce KF stabilization wait for slow threats.
-    // Hypersonic: 4 frames; standard: 2 frames; drone-speed (<2.0 px/f): 1 frame.
-    // Drone rcs=0.05 gives only ~5% Pd/frame, so waiting 2 frames causes ~40-frame
-    // engagement delay. Dropping to age>=1 halves this for very slow targets.
+    if (kf.pos.x > CFG.BATT_X_FRAC * CFG.SIM_W) continue;
     const isDroneSlow = estSpeed < 2.0;
     const minKfAge = isHypersonic ? 4 : (isDroneSlow ? 1 : 2);
-    if (kf.age < minKfAge) continue; // wait for Kalman velocity to stabilize
+    if (kf.age < minKfAge) continue;
 
-    candidates.push({ id, kf, threat, estSpeed, isHypersonic });
+    const altitudeTier = getThreatAltitudeBand(kf.pos.y);
+    const assessment = ensureTrackAssessment(id);
+    let desiredIndex = CFG.TIER_ORDER.indexOf(altitudeTier);
+    if (desiredIndex < 0) desiredIndex = 1;
+
+    if (assessment.currentTierIndex !== null) {
+      if (frameCount < assessment.waitingUntil) continue;
+      desiredIndex = min(CFG.TIER_ORDER.length - 1, assessment.currentTierIndex + 1);
+    }
+
+    const tierKey = CFG.TIER_ORDER[desiredIndex];
+    if (score.magazines[tierKey] <= 0) continue;
+    candidates.push({ id, kf, threat, estSpeed, isHypersonic, tierKey, isReengage: assessment.currentTierIndex !== null });
   }
 
-  // Sort: hypersonic first, then by how far they've penetrated (higher x = more urgent)
   candidates.sort((a, b) => {
-    // Hypersonic always before non-hypersonic
+    if (a.isReengage && !b.isReengage) return -1;
+    if (!a.isReengage && b.isReengage) return 1;
     if (a.isHypersonic && !b.isHypersonic) return -1;
     if (!a.isHypersonic && b.isHypersonic) return 1;
-    // Among same priority: further right (closer to defended zone) = more urgent
     return b.kf.pos.x - a.kf.pos.x;
   });
 
-  // Launch interceptors for each candidate
-  const lx = CFG.BATT_X_FRAC * CFG.SIM_W;
   for (const c of candidates) {
-    const isFast = c.isHypersonic;
-    interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, c.kf, isFast));
-    engagedIds.add(c.id);  // FIX HIGH-1: was 'engaged.add(c.kf)' — undeclared variable ReferenceError
-    score.shots++;
-    if (isFast) {
-      addLog(`C2 ▶ FAST INT LAUNCHED [${c.threat.type}] SPD:${c.estSpeed.toFixed(1)}`);
-    } else {
-      addLog(`C2 ▶ INTERCEPTOR LAUNCHED [${c.threat.type}]`);
-    }
+    if (engagedIds.has(c.id)) continue;
+    if (launchTierInterceptor(c.kf, c.threat, c.tierKey, c.isReengage)) engagedIds.add(c.id);
   }
 }
 
@@ -1128,9 +1159,9 @@ function addLog(msg) {
 
 // v2.0: Kill feed for HUD display
 function addKillFeed(radarId, trackId, intType, result) {
-  const entry = `${radarId}\u2192TRK-${trackId}\u2192${intType}\u2192${result}`;
-  killFeed.unshift({ text: entry, age: 0 });
-  if (killFeed.length > 4) killFeed.pop();
+  const entry = `${radarId}->TRK-${trackId}->${intType}->${result}`;
+  killFeed.unshift({ text: entry, age: 0, tier: intType, result });
+  if (killFeed.length > 6) killFeed.pop();
 }
 
 // ── COLLISION CHECK ───────────────────────────────────────────────────────────
@@ -1139,18 +1170,13 @@ function checkCollisions() {
     if (!inter.alive) continue;
     for (const t of threats) {
       if (!t.alive) continue;
-      // IMPROVED v1.3: Swept-volume proximity check — prevents fast interceptors
-      // from "tunneling" past threats between frames. Check closest point on
-      // the line segment from interceptor's previous position to current position.
       const cx = inter.x - t.x, cy = inter.y - t.y;
-      let minDist = sqrt(cx*cx + cy*cy); // current distance
-      // Check previous position if trail exists
-      if (inter.prevX !== undefined && inter.age >= 2) { // skip swept-volume for first 2 frames — prevX/prevY not yet stable
+      let minDist = sqrt(cx*cx + cy*cy);
+      if (inter.prevX !== undefined && inter.age >= 2) {
         const prev = { x: inter.prevX, y: inter.prevY };
         const segDx = inter.x - prev.x, segDy = inter.y - prev.y;
         const segLen2 = segDx * segDx + segDy * segDy;
         if (segLen2 > 0.01) {
-          // Project threat position onto interceptor's motion segment
           const tProj = max(0, min(1, ((t.x - prev.x) * segDx + (t.y - prev.y) * segDy) / segLen2));
           const closestX = prev.x + tProj * segDx;
           const closestY = prev.y + tProj * segDy;
@@ -1159,28 +1185,27 @@ function checkCollisions() {
           minDist = min(minDist, segDist);
         }
       }
-      if (minDist < CFG.KILL_RADIUS) {
-        // IMPROVED: cyan explosion for fast interceptor kills
-        if (inter.isFast) {
-          boom(t.x, t.y, 0, 255, 255, 32, t.type); // cyan burst
-        } else {
-          boom(t.x, t.y, 255, 180, 40, 28, t.type); // gold intercept explosion
-        }
-        t.alive = false;
+      if (minDist < inter.killRadius) {
+        const c = inter.color;
+        const killed = random() < inter.sspk;
         inter.alive = false;
-        score.kills++;
-        const intType = inter.isFast ? 'FAST' : 'STD';
-        addLog(`★ INTERCEPT  ${t.type} [${intType}]`);
-        // v2.0: Populate kill feed (must be before track deletion)
-        let rdrLabel = 'RDR-?';
-        for (const r of radars) {
-          if (r.tracks.has(t.id)) { rdrLabel = `RDR-${r.id + 1}`; break; }
+        const assessment = ensureTrackAssessment(t.id);
+        assessment.waitingUntil = frameCount + CFG.SLS_ASSESS_DELAY;
+        if (killed) {
+          boom(t.x, t.y, c[0], c[1], c[2], 32, t.type);
+          t.alive = false;
+          score.kills++;
+          score.tierStats[inter.tierKey].hit++;
+          addLog(`${inter.tierKey} HIT [${t.type}]`);
+          addKillFeed('C2', t.id, inter.tierKey, `HIT ${nf(inter.sspk, 1, 2)}`);
+          slsState.delete(t.id);
+        } else {
+          boom(t.x, t.y, c[0], c[1], c[2], 12, null);
+          score.tierStats[inter.tierKey].miss++;
+          addLog(`${inter.tierKey} MISS [${t.type}] LOOK`);
+          addKillFeed('C2', t.id, inter.tierKey, `MISS ${nf(inter.sspk, 1, 2)}`);
         }
-        if (rdrLabel === 'RDR-?' && ewRadar.tracks.has(t.id)) { rdrLabel = 'EW-1'; }
-        addKillFeed(rdrLabel, t.id, inter.isFast ? 'FAST' : 'STD', 'KILL');
-        for (const r of radars) r.tracks.delete(t.id);
-        ewRadar.tracks.delete(t.id); // IMPROVED v1.2: clean EW tracks too
-        break;  // FIX v1.4: exit inner loop — this interceptor is spent
+        break;
       }
     }
   }
@@ -1371,76 +1396,76 @@ function drawPanel() {
   const px = CFG.SIM_W + 12;
   const pw = CFG.W - CFG.SIM_W;
   push();
-  // Panel background
   fill(2, 10, 4); noStroke(); rect(CFG.SIM_W, 0, pw, CFG.H);
   stroke(0, 120, 40, 100); strokeWeight(1); line(CFG.SIM_W, 0, CFG.SIM_W, CFG.H);
 
-  // ── Title block
   fill(0, 255, 65); noStroke(); textSize(11); textAlign(LEFT);
-  text('◈ IAMD COMMAND v2.1', px, 22);
+  text('LAYERED IAMD COMMAND v2.2', px, 22);
   fill(0, 120, 50); textSize(8);
-  text('2D RANGE-HEIGHT DISPLAY', px, 33);
+  text('SLS TIERED INTERCEPT DISPLAY', px, 33);
   stroke(0, 90, 35); line(px, 37, CFG.W-8, 37);
 
-  // ── Score block
   let y = 52;
   const statLine = (label, val, vr=0, vg=255, vb=65) => {
     fill(0, 120, 45); textSize(9); textAlign(LEFT); text(label, px, y);
     fill(vr, vg, vb); textAlign(RIGHT); text(val, CFG.W-10, y);
-    textAlign(LEFT); y += 17;
+    textAlign(LEFT); y += 15;
   };
-  statLine('WAVE',        score.wave);
-  statLine('KILLS',       score.kills, 0, 255, 100);
+  statLine('WAVE', score.wave);
+  statLine('KILLS', score.kills, 0, 255, 100);
   const lc = score.leak > 2 ? [255,70,70] : [255,170,50];
-  statLine('LEAKAGE',     `${score.leak}/${CFG.MAX_LEAKAGE}`, ...lc);
+  statLine('LEAKAGE', `${score.leak}/${CFG.MAX_LEAKAGE}`, ...lc);
   statLine('SHOTS FIRED', score.shots, 0, 200, 255);
+  statLine('SLS RE-ENGAGE', score.slsReengage, 255, 220, 110);
   const tot = score.kills + score.leak;
   const pct = tot > 0 ? floor((score.kills/tot)*100) : 100;
-  statLine('KILL RATE',   `${pct}%`, pct>70 ? 0 : 255, pct>70 ? 255 : 80, pct>70 ? 65 : 80);
+  statLine('KILL RATE', `${pct}%`, pct>70 ? 0 : 255, pct>70 ? 255 : 80, pct>70 ? 65 : 80);
+  statLine('ACTIVE TGT', threats.filter(t => t.alive).length, 255, 180, 50);
+  statLine('ACTIVE INT', interceptors.filter(i => i.alive).length, 0, 200, 255);
 
-  // v2.0: Active threat/interceptor counts
-  const activeThreats = threats.filter(t => t.alive).length;
-  const activeInts = interceptors.filter(i => i.alive).length;
-  statLine('ACTIVE TGT', activeThreats, 255, 180, 50);
-  statLine('ACTIVE INT', activeInts, 0, 200, 255);
-
-  // v2.0: Interceptor magazine bar
-  y += 2;
-  fill(0, 120, 45); textSize(8); text('\u2500\u2500 MAGAZINE \u2500\u2500', px, y); y += 10;
-  const magSize = 30;
-  const used = min(score.shots, magSize);
-  for (let i = 0; i < magSize; i++) {
-    const bx = px + (i % 15) * 16;
-    const by = y + floor(i / 15) * 9;
-    if (i < magSize - used) {
-      fill(0, 200, 255, 120);
-    } else {
-      fill(0, 60, 80, 40);
-    }
-    noStroke();
-    rect(bx, by, 13, 6, 1);
+  y += 1;
+  fill(0, 120, 45); textSize(8); text('-- MAGAZINES --', px, y); y += 9;
+  for (const tierKey of CFG.TIER_ORDER) {
+    const tier = CFG.INT_TIERS[tierKey];
+    const c = tier.color;
+    fill(c[0], c[1], c[2]); textSize(8); text(`${tierKey} ${score.magazines[tierKey]}/${tier.magazine}`, px, y);
+    const barX = px + 74;
+    const barW = 80;
+    const frac = score.magazines[tierKey] / tier.magazine;
+    noFill(); stroke(0, 90, 35); rect(barX, y - 7, barW, 5, 1);
+    noStroke(); fill(c[0], c[1], c[2], 180); rect(barX, y - 7, barW * frac, 5, 1);
+    y += 10;
   }
-  y += 24;
 
-  // v2.0: Kill feed
-  y += 4; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 11;
-  fill(0, 160, 55); textSize(8); text('\u2500\u2500 KILL FEED \u2500\u2500', px, y); y += 11;
+  y += 3; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 10;
+  fill(0, 160, 55); textSize(8); text('-- TIER STATS --', px, y); y += 10;
+  for (const tierKey of CFG.TIER_ORDER) {
+    const s = score.tierStats[tierKey];
+    const tier = CFG.INT_TIERS[tierKey];
+    const c = tier.color;
+    fill(c[0], c[1], c[2], 210); textSize(7.5);
+    text(`${tierKey} F:${s.fire} H:${s.hit} M:${s.miss} SSPK:${tier.sspk.toFixed(2)}`, px, y);
+    y += 10;
+  }
+
+  y += 2; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 10;
+  fill(0, 160, 55); textSize(8); text('-- KILL FEED --', px, y); y += 10;
   if (killFeed.length === 0) {
-    fill(0, 80, 35); textSize(7); text('No kills yet', px, y); y += 10;
+    fill(0, 80, 35); textSize(7); text('No intercept assessments yet', px, y); y += 10;
   } else {
     for (const kf of killFeed) {
-      fill(0, 255, 100, map(kf.age, 0, 200, 230, 40));
-      textSize(7); text(kf.text, px, y); y += 10;
+      const c = getTierColor(kf.tier);
+      fill(c[0], c[1], c[2], map(kf.age, 0, 220, 230, 40));
+      textSize(7); text(`[${kf.tier}] ${kf.text}`, px, y); y += 9;
       kf.age++;
     }
-    killFeed = killFeed.filter(k => k.age < 300);
+    killFeed = killFeed.filter(k => k.age < 320);
   }
 
-  // v2.0: Threat priority queue (top 5 closest)
-  y += 4; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 11;
-  fill(0, 160, 55); textSize(8); text('\u2500\u2500 THREAT QUEUE \u2500\u2500', px, y); y += 11;
+  y += 2; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 10;
+  fill(0, 160, 55); textSize(8); text('-- THREAT QUEUE --', px, y); y += 10;
   const tgtList = [];
-  const allRadars = [...radars, ewRadar]; // include EW radar
+  const allRadars = [...radars, ewRadar];
   const seenIds = new Set();
   for (const r of allRadars) {
     for (const [id, kf] of r.tracks) {
@@ -1448,67 +1473,60 @@ function drawPanel() {
       seenIds.add(id);
       const threat = threats.find(t => t.id === id && t.alive);
       if (!threat) continue;
-      const estSpd = kf.speed; // FIX: use KalmanTrack.speed getter for consistency
       const distToBatt = abs(CFG.BATT_X_FRAC * CFG.SIM_W - kf.pos.x);
-      tgtList.push({ type: threat.type, spd: estSpd, dist: distToBatt, engaged: interceptors.some(i => i.alive && i.track === kf) });
+      const band = getThreatAltitudeBand(kf.pos.y);
+      tgtList.push({ type: threat.type, spd: kf.speed, dist: distToBatt, band, engaged: interceptors.some(i => i.alive && i.trackId === id) });
     }
   }
   tgtList.sort((a, b) => a.dist - b.dist);
-  const topN = tgtList.slice(0, 5);
+  const topN = tgtList.slice(0, 4);
   if (topN.length === 0) {
     fill(0, 80, 35); textSize(7); text('No tracked threats', px, y); y += 10;
   } else {
     for (const tgt of topN) {
-      const typeColors = { BALLISTIC: [255, 80, 60], CRUISE: [255, 160, 40], HYPERSONIC: [180, 80, 255], DRONE: [60, 255, 180] };
-      const tc = typeColors[tgt.type] || [0, 255, 65];
-      fill(...tc, 200); textSize(7);
-      const status = tgt.engaged ? 'ENGAGED' : 'TRACKED';
-      const spdStr = tgt.spd.toFixed(1);
-      text(`${tgt.type.substring(0, 4)} Spd:${spdStr} ${status}`, px, y);
-      y += 10;
+      const tc = getTierColor(tgt.band);
+      fill(tc[0], tc[1], tc[2], 210); textSize(7);
+      text(`${tgt.band.slice(0,3)} ${tgt.type.slice(0,4)} Spd:${tgt.spd.toFixed(1)} ${tgt.engaged ? 'ENGAGED' : 'TRACKED'}`, px, y);
+      y += 9;
     }
   }
 
-  // ── System params
-  y += 4; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
-  fill(0, 160, 55); textSize(9); text('── SYS PARAMS ──', px, y); y += 13;
-  fill(0, 110, 42); textSize(8);
-  const param = (k, v) => { text(`${k} : ${v}`, px, y); y += 11; };
-  param('PN constant  N', CFG.PN_N);
-  param('Radar range  ', `${CFG.RADAR_RANGE_PX}px`);
-  param('Kill radius  ', `${CFG.KILL_RADIUS}px`);
-  param('Wave period  ', `${CFG.WAVE_MS/1000}s`);
-  param('STD INT speed', `${CFG.INT_SPEED}px/f`);
-  param('FAST INT spd ', `${CFG.FAST_INT_SPEED}px/f`); // IMPROVED: show fast interceptor speed
+  y += 2; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 11;
+  fill(0, 160, 55); textSize(8); text('-- SYS PARAMS --', px, y); y += 10;
+  fill(0, 110, 42); textSize(7.5);
+  const param = (k, v) => { text(`${k}: ${v}`, px, y); y += 9; };
+  param('Radar', `${CFG.RADAR_RANGE_PX}px`);
+  param('Assess', `${CFG.SLS_ASSESS_DELAY}f`);
+  param('Upper', `${CFG.INT_TIERS.UPPER.speed}px/f N${CFG.INT_TIERS.UPPER.navConst}`);
+  param('Middle', `${CFG.INT_TIERS.MIDDLE.speed}px/f N${CFG.INT_TIERS.MIDDLE.navConst}`);
+  param('Lower', `${CFG.INT_TIERS.LOWER.speed}px/f N${CFG.INT_TIERS.LOWER.navConst}`);
 
-  // ── Legend
-  y += 4; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
-  fill(0, 160, 55); textSize(9); text('── LEGEND ──', px, y); y += 13;
+  y += 2; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 11;
+  fill(0, 160, 55); textSize(8); text('-- LEGEND --', px, y); y += 10;
   const leg = [
-    [[255,80,60],  '▶ Ballistic (BSTC)'],
-    [[255,160,40], '▶ Cruise (CRZ)'],
-    [[180,80,255], '▶ Hypersonic (HGV)'],
-    [[60,255,180], '▶ Drone swarm'],
-    [[0,210,255],  '◁ Interceptor STD (PN)'],
-    [[0,255,255],  '◁ Interceptor FAST (PN)'], // IMPROVED: fast interceptor in legend
-    [[0,255,65],   '◎ Radar + track'],
-    [[255,160,30], '◈ EW Radar (elevated)'],
+    [[255,80,60],  'Ballistic (BSTC)'],
+    [[255,160,40], 'Cruise (CRZ)'],
+    [[180,80,255], 'Hypersonic (HGV)'],
+    [[60,255,180], 'Drone swarm'],
+    [CFG.INT_TIERS.UPPER.color,  'UPPER interceptor / HIMEZ'],
+    [CFG.INT_TIERS.MIDDLE.color, 'MIDDLE interceptor / LOMEZ'],
+    [CFG.INT_TIERS.LOWER.color,  'LOWER interceptor / SHORADEZ'],
+    [[0,255,65],   'Radar + track'],
+    [[255,160,30], 'EW radar'],
   ];
   for (const [c, l] of leg) {
-    fill(...c); noStroke(); textSize(8); text(l, px, y); y += 11;
+    fill(...c); noStroke(); textSize(7.5); text(l, px, y); y += 9;
   }
 
-  // ── Event log
-  y += 5; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 13;
-  fill(0, 155, 55); textSize(9); text('── EVENT LOG ──', px, y); y += 12;
+  y += 3; stroke(0, 80, 30); line(px, y, CFG.W-8, y); y += 11;
+  fill(0, 155, 55); textSize(8); text('-- EVENT LOG --', px, y); y += 10;
   for (const m of log) {
     fill(0, 200, 75, map(m.age, 0, 220, 255, 40));
-    textSize(7.5); text(m.text, px, y); y += 11;
+    textSize(7); text(m.text, px, y); y += 9;
     m.age++;
   }
   log = log.filter(m => m.age < 300);
 
-  // ── Controls hint
   stroke(0, 60, 25); line(px, CFG.H-38, CFG.W-8, CFG.H-38);
   fill(0, 90, 38); textSize(7.5); noStroke();
   text('[R] Restart  [+/-] Wave speed', px, CFG.H-26);
@@ -1545,15 +1563,28 @@ function initGame() {
   ];
   // IMPROVED v1.2: Elevated early-warning radar for high-altitude threat detection
   ewRadar = new EWRadar();
-  score       = { wave: 0, kills: 0, leak: 0, shots: 0 };
+  score       = {
+    wave: 0, kills: 0, leak: 0, shots: 0, slsReengage: 0,
+    magazines: {
+      UPPER: CFG.INT_TIERS.UPPER.magazine,
+      MIDDLE: CFG.INT_TIERS.MIDDLE.magazine,
+      LOWER: CFG.INT_TIERS.LOWER.magazine,
+    },
+    tierStats: {
+      UPPER: { fire: 0, hit: 0, miss: 0 },
+      MIDDLE: { fire: 0, hit: 0, miss: 0 },
+      LOWER: { fire: 0, hit: 0, miss: 0 },
+    },
+  };
   log         = [];
   killFeed    = [];
+  slsState    = new Map();
   screenShake = 0;
   gameOver    = false;
   lastWave    = millis();
   lastC2Frame = 0;
-  addLog('SYSTEM NOMINAL — AWAITING THREATS');
-  addLog('SAM/THAAD BATTERY ONLINE');
+  addLog('SYSTEM NOMINAL - AWAITING THREATS');
+  addLog('LAYERED DEFENSE BATTERY ONLINE');
 }
 
 // ── P5.JS ENTRY POINTS ────────────────────────────────────────────────────────
@@ -1581,6 +1612,7 @@ function draw() {
   drawingContext.rect(0, 0, CFG.SIM_W, CFG.H);
   drawingContext.clip();
   drawGrid();
+  drawEngagementBands();
 
   // ── Wave spawning timer
   if (!gameOver && millis() - lastWave > CFG.WAVE_MS) {
