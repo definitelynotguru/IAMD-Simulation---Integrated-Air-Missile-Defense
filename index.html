@@ -211,6 +211,9 @@ class KF1D {
     const newPxv = this.Pxv + dt * this.Pv;
     const newPv  = this.Pv + q;
     this.Pp = newPp; this.Pxv = newPxv; this.Pv = newPv;
+    // FIX MEDIUM-1: Floor Pp to prevent negative covariance & clamp Pxv to valid correlation bound
+    this.Pp = Math.max(this.Pp, 0.01);
+    this.Pxv = Math.max(-Math.sqrt(this.Pp * this.Pv), Math.min(this.Pxv, Math.sqrt(this.Pp * this.Pv)));
     // FIX MED-3: Cap covariance growth during sparse-measurement periods
     this.Pp = min(this.Pp, 5000);
   }
@@ -839,15 +842,17 @@ class Interceptor {
       this.vx = (this.vx/spd) * this.speed;
       this.vy = (this.vy/spd) * this.speed;
     }
+    // FIX MEDIUM-2: NaN guard moved BEFORE position update — check velocity
+    // first so non-finite values never propagate into position coordinates.
+    if (!isFinite(this.vx) || !isFinite(this.vy)) {
+      this.alive = false; return;
+    }
     this.prevX = this.x;
     this.prevY = this.y;
     this.x += this.vx; this.y += this.vy;
 
-    // FIX MEDIUM-1: NaN-immortal interceptor guard — if any velocity/position
-    // component becomes non-finite (NaN/Inf), kill immediately to prevent
-    // immortal array-slot leak and dangling C2 engaged-Set reference.
-    if (!isFinite(this.x) || !isFinite(this.y) ||
-        !isFinite(this.vx) || !isFinite(this.vy)) {
+    // Secondary guard: catch any position NaN from accumulated drift
+    if (!isFinite(this.x) || !isFinite(this.y)) {
       this.alive = false; return;
     }
 
@@ -1080,7 +1085,7 @@ function runC2() {
   for (const c of candidates) {
     const isFast = c.isHypersonic;
     interceptors.push(new Interceptor(lx, CFG.SIM_H - 8, c.kf, isFast));
-    engaged.add(c.kf);  // prevent duplicate launches this cycle
+    engagedIds.add(c.id);  // FIX HIGH-1: was 'engaged.add(c.kf)' — undeclared variable ReferenceError
     score.shots++;
     if (isFast) {
       addLog(`C2 ▶ FAST INT LAUNCHED [${c.threat.type}] SPD:${c.estSpeed.toFixed(1)}`);
