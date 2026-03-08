@@ -110,6 +110,16 @@
 //   - [MEDIUM-4] Screen shake viewport-clipped: right-side panel no longer
 //     shakes (drawingContext.clip to SIM_W before sim drawing).
 // =============================================================================
+// CHANGELOG v2.3.2 — SCAN #19 BUG FIXES (auto-fixed 2026-03-08):
+//   HIGH:
+//   - [BUG-1] Map.delete() during for...of iteration: snapshot keys before
+//     deleting in ghost track pruning loop for safe iteration (L1839).
+//   MEDIUM:
+//   - [BUG-2] Particle.update() and ShockwaveRing.update() not scaled by dt:
+//     all visual effects now frame-rate-independent via dt parameter.
+//   - [BUG-3] Dead config properties engageAltMin/engageAltMax removed from
+//     all SLS_TIERS entries (engagement zones use engageYMinFrac/engageYMaxFrac).
+// =============================================================================
 // CHANGELOG v2.1 — BUG HUNT FIXES (auto-fixed 2026-03-08):
 //   HIGH:
 //   - [H1] Ghost Track Memory Leak: prune radar tracks for dead threats after
@@ -205,8 +215,7 @@ const CFG = {
       sspk: 0.80,
       magazine: 8,
       killRadius: 30,
-      engageAltMin: 0.35,
-      engageAltMax: 0.0,
+      // FIX BUG-3: removed dead engageAltMin/engageAltMax (engagement zones use engageYMinFrac/engageYMaxFrac)
       engageYMinFrac: 0.00,
       engageYMaxFrac: 0.35,
       preferredThreats: ['ballistic', 'hypersonic'],
@@ -223,8 +232,7 @@ const CFG = {
       sspk: 0.75,
       magazine: 12,
       killRadius: 24,
-      engageAltMin: 0.65,
-      engageAltMax: 0.25,
+      // FIX BUG-3: removed dead engageAltMin/engageAltMax (engagement zones use engageYMinFrac/engageYMaxFrac)
       engageYMinFrac: 0.35, // FIX MEDIUM-1: was 0.25, causing 56px overlap with UPPER band
       engageYMaxFrac: 0.65,
       preferredThreats: ['cruise', 'ballistic', 'hypersonic'],
@@ -241,8 +249,7 @@ const CFG = {
       sspk: 0.70,
       magazine: 18,
       killRadius: 18,
-      engageAltMin: 1.0,
-      engageAltMax: 0.55,
+      // FIX BUG-3: removed dead engageAltMin/engageAltMax (engagement zones use engageYMinFrac/engageYMaxFrac)
       engageYMinFrac: 0.65, // FIX MEDIUM-1: was 0.55, causing 56px overlap with MIDDLE band
       engageYMaxFrac: 1.00,
       preferredThreats: ['drone', 'cruise'],
@@ -1034,11 +1041,11 @@ class Particle {
     this.r = r; this.g = g; this.b = b;
     this.sz = opts.size || random(2, 7);
   }
-  update() {
-    this.x += this.vx; this.y += this.vy;
-    this.vy += this.gravity;
-    this.vx *= 0.91; this.vy *= 0.91;
-    this.life -= this.decay;
+  update(dt = 1) { // FIX BUG-2: scale by dt for frame-rate independence
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    this.vy += this.gravity * dt;
+    this.vx *= Math.pow(0.91, dt); this.vy *= Math.pow(0.91, dt);
+    this.life -= this.decay * dt;
   }
   draw() {
     noStroke();
@@ -1056,9 +1063,9 @@ class ShockwaveRing {
     this.radius = 2; this.maxRadius = random(28, 45);
     this.life = 1.0;
   }
-  update() {
-    this.radius += (this.maxRadius - this.radius) * 0.12;
-    this.life -= 0.035;
+  update(dt = 1) { // FIX BUG-2: scale by dt for frame-rate independence
+    this.radius += (this.maxRadius - this.radius) * (1 - Math.pow(1 - 0.12, dt));
+    this.life -= 0.035 * dt;
   }
   draw() {
     noFill();
@@ -1836,7 +1843,7 @@ function draw() {
   {
     const aliveIds = new Set(threats.map(t => t.id));
     for (const r of [...radars, ewRadar]) {
-      for (const [id] of r.tracks) {
+      for (const id of [...r.tracks.keys()]) { // FIX BUG-1: snapshot keys before deleting (safe Map iteration)
         if (!aliveIds.has(id)) r.tracks.delete(id);
       }
     }
@@ -1894,7 +1901,7 @@ function draw() {
   killFeed = killFeed.filter(k => k.age < 320);
 
   // ── Particle update + draw
-  for (const p of particles) { p.update(); p.draw(); }
+  for (const p of particles) { p.update(dt); p.draw(); } // FIX BUG-2: pass dt for frame-rate-independent particles
   particles = particles.filter(p => !p.dead);
 
   // ── Draw scene elements (order: trails, bodies, overlays)
