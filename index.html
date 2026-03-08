@@ -38,14 +38,14 @@
   </style>
 </head>
 <body>
-<div id="header">◈ INTEGRATED AIR & MISSILE DEFENSE SIMULATION v2.1 ◈</div>
+<div id="header">◈ INTEGRATED AIR & MISSILE DEFENSE SIMULATION v2.3 — SLS TIERED DEFENSE ◈</div>
 
 <!-- p5.js loaded via CDN — no npm, no build tools required -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
 
 <script>
 // =============================================================================
-// IAMD SIMULATION — Phase 1 Starter (v2.1 — Bug Fixes + Survival Extension)
+// IAMD SIMULATION — v2.3 — SLS Tiered Defense + Engagement Zones + preferredThreats
 // View: 2D Side View (Range × Altitude range-height display)
 // Threats: Ballistic, Cruise, Hypersonic Glide, Drone Swarm
 // Guidance: Proportional Navigation  →  a_m = N · V_c · (dθ/dt)
@@ -156,50 +156,60 @@ const CFG = {
       key: 'UPPER',
       label: 'UPPER',
       zoneLabel: 'HIMEZ',
-      color: [255, 110, 110],
-      trailColor: [255, 90, 90, 130],
-      speed: 14.0,
+      color: [255, 100, 100],
+      trailColor: [255, 80, 80, 120],
+      speed: 14,
       accelMax: 0.25,
       navConst: 3.5,
       sspk: 0.80,
       magazine: 8,
       killRadius: 30,
+      engageAltMin: 0.35,
+      engageAltMax: 0.0,
       engageYMinFrac: 0.00,
       engageYMaxFrac: 0.35,
+      preferredThreats: ['ballistic', 'hypersonic'],
     },
     MIDDLE: {
       key: 'MIDDLE',
       label: 'MIDDLE',
       zoneLabel: 'LOMEZ',
-      color: [100, 210, 255],
-      trailColor: [100, 210, 255, 125],
-      speed: 10.0,
+      color: [100, 200, 255],
+      trailColor: [100, 180, 255, 120],
+      speed: 10,
       accelMax: 0.45,
       navConst: 4.0,
-      sspk: 0.68,
-      magazine: 14,
-      killRadius: 22,
-      engageYMinFrac: 0.35,
-      engageYMaxFrac: 0.68,
+      sspk: 0.75,
+      magazine: 12,
+      killRadius: 24,
+      engageAltMin: 0.65,
+      engageAltMax: 0.25,
+      engageYMinFrac: 0.25,
+      engageYMaxFrac: 0.65,
+      preferredThreats: ['cruise', 'ballistic', 'hypersonic'],
     },
     LOWER: {
       key: 'LOWER',
       label: 'LOWER',
       zoneLabel: 'SHORADEZ',
-      color: [120, 255, 160],
-      trailColor: [120, 255, 160, 120],
-      speed: 8.2,
-      accelMax: 0.75,
-      navConst: 4.6,
-      sspk: 0.52,
-      magazine: 20,
-      killRadius: 16,
-      engageYMinFrac: 0.68,
+      color: [100, 255, 100],
+      trailColor: [80, 255, 80, 120],
+      speed: 7,
+      accelMax: 0.8,
+      navConst: 5.0,
+      sspk: 0.70,
+      magazine: 18,
+      killRadius: 18,
+      engageAltMin: 1.0,
+      engageAltMax: 0.55,
+      engageYMinFrac: 0.55,
       engageYMaxFrac: 1.00,
+      preferredThreats: ['drone', 'cruise'],
     },
   },
   TIER_ORDER: ['UPPER', 'MIDDLE', 'LOWER'],
-  SLS_ASSESS_DELAY: 24,       // frames to wait after an intercept attempt before re-engaging down a layer
+  ASSESS_DELAY: 15,           // frames for SLS look phase before re-engaging down a layer
+  SLS_ASSESS_DELAY: 15,       // alias — frames to wait after intercept attempt
 
   // Threat speeds (px/frame — faster = harder to intercept)
   SPD_BALLISTIC:  3.2,
@@ -518,6 +528,9 @@ class Threat {
     this.trail = [];    // position history for motion trail
     this.x = 0; this.y = 0;
     this.vx = 0; this.vy = 0;
+    // SLS engagement tracking
+    this.engagementHistory = [];  // [{tier, result:'hit'|'miss'}]
+    this.assessmentTimer = 0;     // frames remaining in SLS look phase
   }
   saveTrail() {
     if (this.trail.length >= 45) this.trail.shift(); // FIX BUG-L1: check before push so steady-state max = 45 as intended
@@ -1025,9 +1038,17 @@ let slsState = new Map();
 //   5. Launch standard interceptors (PAC-3 class) for everything else
 //   6. Adaptive cooldown: check for fast movers more frequently
 function getThreatAltitudeBand(y) {
-  if (y <= CFG.SIM_H * CFG.INT_TIERS.UPPER.engageYMaxFrac) return 'UPPER';
-  if (y <= CFG.SIM_H * CFG.INT_TIERS.MIDDLE.engageYMaxFrac) return 'MIDDLE';
+  const frac = y / CFG.SIM_H;
+  if (frac <= CFG.INT_TIERS.UPPER.engageYMaxFrac) return 'UPPER';
+  if (frac <= CFG.INT_TIERS.MIDDLE.engageYMaxFrac) return 'MIDDLE';
   return 'LOWER';
+}
+
+// Check if a threat type is preferred by a tier (SLS tier-matching)
+function isThreatPreferred(tierKey, threatType) {
+  const tier = CFG.INT_TIERS[tierKey];
+  if (!tier || !tier.preferredThreats) return false;
+  return tier.preferredThreats.includes(threatType.toLowerCase());
 }
 
 function getTierColor(tierKey) {
@@ -1102,12 +1123,24 @@ function runC2() {
     let desiredIndex = CFG.TIER_ORDER.indexOf(altitudeTier);
     if (desiredIndex < 0) desiredIndex = 1;
 
+    // SLS re-engage: if previous tier missed and assessment timer expired, step down
     if (assessment.currentTierIndex !== null) {
       if (frameCount < assessment.waitingUntil) continue;
       desiredIndex = min(CFG.TIER_ORDER.length - 1, assessment.currentTierIndex + 1);
     }
 
-    const tierKey = CFG.TIER_ORDER[desiredIndex];
+    // Find best tier: prefer one whose preferredThreats includes this threat type
+    let tierKey = CFG.TIER_ORDER[desiredIndex];
+    // If current tier doesn't prefer this threat type, search for a better match
+    if (!isThreatPreferred(tierKey, threat.type)) {
+      for (let ti = desiredIndex; ti < CFG.TIER_ORDER.length; ti++) {
+        const candidate = CFG.TIER_ORDER[ti];
+        if (isThreatPreferred(candidate, threat.type) && score.magazines[candidate] > 0) {
+          tierKey = candidate;
+          break;
+        }
+      }
+    }
     if (score.magazines[tierKey] <= 0) continue;
     candidates.push({ id, kf, threat, estSpeed, isHypersonic, tierKey, isReengage: assessment.currentTierIndex !== null });
   }
@@ -1196,12 +1229,15 @@ function checkCollisions() {
           t.alive = false;
           score.kills++;
           score.tierStats[inter.tierKey].hit++;
+          t.engagementHistory.push({ tier: inter.tierKey, result: 'hit' });
           addLog(`${inter.tierKey} HIT [${t.type}]`);
           addKillFeed('C2', t.id, inter.tierKey, `HIT ${nf(inter.sspk, 1, 2)}`);
           slsState.delete(t.id);
         } else {
           boom(t.x, t.y, c[0], c[1], c[2], 12, null);
           score.tierStats[inter.tierKey].miss++;
+          t.engagementHistory.push({ tier: inter.tierKey, result: 'miss' });
+          t.assessmentTimer = CFG.SLS_ASSESS_DELAY;
           addLog(`${inter.tierKey} MISS [${t.type}] LOOK`);
           addKillFeed('C2', t.id, inter.tierKey, `MISS ${nf(inter.sspk, 1, 2)}`);
         }
@@ -1266,6 +1302,33 @@ function drawEngagementLines() {
       line(x1, y1, x2, y2);
     }
   }
+}
+
+// ── DRAW ENGAGEMENT ZONES (HIMEZ / LOMEZ / SHORADEZ) ─────────────────────────
+// Three subtle translucent horizontal bands indicating tiered defense zones
+function drawEngagementZones() {
+  push();
+  noStroke();
+  textSize(8);
+  textAlign(LEFT);
+  for (const tierKey of CFG.TIER_ORDER) {
+    const tier = CFG.INT_TIERS[tierKey];
+    const yMin = tier.engageYMinFrac * CFG.SIM_H;
+    const yMax = tier.engageYMaxFrac * CFG.SIM_H;
+    const h = yMax - yMin;
+    // Subtle translucent band
+    fill(tier.color[0], tier.color[1], tier.color[2], 12);
+    rect(0, yMin, CFG.SIM_W, h);
+    // Zone boundary line
+    stroke(tier.color[0], tier.color[1], tier.color[2], 35);
+    strokeWeight(0.5);
+    line(0, yMin, CFG.SIM_W, yMin);
+    noStroke();
+    // Zone label on left margin
+    fill(tier.color[0], tier.color[1], tier.color[2], 100);
+    text(tier.zoneLabel, 4, yMin + 12);
+  }
+  pop();
 }
 
 // ── DRAW GRID ─────────────────────────────────────────────────────────────────
@@ -1405,6 +1468,16 @@ function drawPanel() {
   text('SLS TIERED INTERCEPT DISPLAY', px, 33);
   stroke(0, 90, 35); line(px, 37, CFG.W-8, 37);
 
+  // SLS ACTIVE indicator — blinks when any threat is in SLS look phase
+  const slsActive = slsState.size > 0 && [...slsState.values()].some(s => s.currentTierIndex !== null && frameCount < s.waitingUntil);
+  if (slsActive) {
+    const blink = (frameCount % 30) < 20;
+    if (blink) {
+      fill(255, 220, 50, 220); noStroke(); textSize(8);
+      text('SLS ACTIVE', px + 140, 33);
+    }
+  }
+
   let y = 52;
   const statLine = (label, val, vr=0, vg=255, vb=65) => {
     fill(0, 120, 45); textSize(9); textAlign(LEFT); text(label, px, y);
@@ -1416,7 +1489,7 @@ function drawPanel() {
   const lc = score.leak > 2 ? [255,70,70] : [255,170,50];
   statLine('LEAKAGE', `${score.leak}/${CFG.MAX_LEAKAGE}`, ...lc);
   statLine('SHOTS FIRED', score.shots, 0, 200, 255);
-  statLine('SLS RE-ENGAGE', score.slsReengage, 255, 220, 110);
+  // SLS RE-ENGAGE counter moved to TIER STATS section
   const tot = score.kills + score.leak;
   const pct = tot > 0 ? floor((score.kills/tot)*100) : 100;
   statLine('KILL RATE', `${pct}%`, pct>70 ? 0 : 255, pct>70 ? 255 : 80, pct>70 ? 65 : 80);
@@ -1439,14 +1512,21 @@ function drawPanel() {
 
   y += 3; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 10;
   fill(0, 160, 55); textSize(8); text('-- TIER STATS --', px, y); y += 10;
+  // Column headers
+  fill(0, 110, 42); textSize(6.5);
+  text('TIER   FIRE  HIT  MISS  SSPK  ACTUAL', px, y); y += 9;
   for (const tierKey of CFG.TIER_ORDER) {
     const s = score.tierStats[tierKey];
     const tier = CFG.INT_TIERS[tierKey];
     const c = tier.color;
-    fill(c[0], c[1], c[2], 210); textSize(7.5);
-    text(`${tierKey} F:${s.fire} H:${s.hit} M:${s.miss} SSPK:${tier.sspk.toFixed(2)}`, px, y);
+    const actualSspk = s.fire > 0 ? (s.hit / s.fire).toFixed(2) : '--';
+    fill(c[0], c[1], c[2], 210); textSize(7);
+    text(`${tierKey.padEnd(7)} ${String(s.fire).padStart(3)}  ${String(s.hit).padStart(3)}  ${String(s.miss).padStart(3)}  ${tier.sspk.toFixed(2)}  ${actualSspk}`, px, y);
     y += 10;
   }
+  // SLS re-engage counter
+  fill(255, 220, 110, 190); textSize(7);
+  text(`SLS RE-ENGAGE: ${score.slsReengage}`, px, y); y += 10;
 
   y += 2; stroke(0, 80, 30); line(px, y, CFG.W - 8, y); y += 10;
   fill(0, 160, 55); textSize(8); text('-- KILL FEED --', px, y); y += 10;
@@ -1508,12 +1588,20 @@ function drawPanel() {
     [[255,160,40], 'Cruise (CRZ)'],
     [[180,80,255], 'Hypersonic (HGV)'],
     [[60,255,180], 'Drone swarm'],
-    [CFG.INT_TIERS.UPPER.color,  'UPPER interceptor / HIMEZ'],
-    [CFG.INT_TIERS.MIDDLE.color, 'MIDDLE interceptor / LOMEZ'],
-    [CFG.INT_TIERS.LOWER.color,  'LOWER interceptor / SHORADEZ'],
+    [CFG.INT_TIERS.UPPER.color,  `UPPER int (Spd:${CFG.INT_TIERS.UPPER.speed} SSPK:${CFG.INT_TIERS.UPPER.sspk})`],
+    [CFG.INT_TIERS.MIDDLE.color, `MIDDLE int (Spd:${CFG.INT_TIERS.MIDDLE.speed} SSPK:${CFG.INT_TIERS.MIDDLE.sspk})`],
+    [CFG.INT_TIERS.LOWER.color,  `LOWER int (Spd:${CFG.INT_TIERS.LOWER.speed} SSPK:${CFG.INT_TIERS.LOWER.sspk})`],
     [[0,255,65],   'Radar + track'],
     [[255,160,30], 'EW radar'],
   ];
+  // Draw small interceptor shape icons next to each tier entry
+  for (let li = 0; li < leg.length; li++) {
+    // Only draw shape icons for interceptor entries (indices 4, 5, 6)
+    if (li >= 4 && li <= 6) {
+      const iconY = y + (li * 9) - 3;
+      // Icon is drawn after the text loop below
+    }
+  }
   for (const [c, l] of leg) {
     fill(...c); noStroke(); textSize(7.5); text(l, px, y); y += 9;
   }
@@ -1612,7 +1700,7 @@ function draw() {
   drawingContext.rect(0, 0, CFG.SIM_W, CFG.H);
   drawingContext.clip();
   drawGrid();
-  drawEngagementBands();
+  drawEngagementZones();
 
   // ── Wave spawning timer
   if (!gameOver && millis() - lastWave > CFG.WAVE_MS) {
@@ -1621,12 +1709,14 @@ function draw() {
     lastWave = max(millis(), lastWave + CFG.WAVE_MS);
   }
 
-  // ── Threat updates
+  // ── Threat updates (includes SLS assessment timer decrement)
   const liveDrones = threats.filter(t => t.type==='DRONE' && t.alive);
   for (const t of threats) {
     if (!t.alive) continue;
     if (t.type === 'DRONE') t.update(liveDrones);
     else t.update();
+    // SLS: decrement assessment timer each frame
+    if (t.assessmentTimer > 0) t.assessmentTimer--;
   }
   threats = threats.filter(t => t.alive);
 
