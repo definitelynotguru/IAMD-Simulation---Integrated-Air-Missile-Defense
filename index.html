@@ -628,6 +628,9 @@ class BallisticMissile extends Threat {
     this.vy += CFG.GRAVITY_PX * dt; // gravitational acceleration scaled by dt
     this.x  += this.vx * dt;
     this.y  += this.vy * dt;
+    // FIX MEDIUM-3: Check battery leakage BEFORE ground-impact to prevent scoring race condition
+    // If already past battery x-position, let checkCollisions() handle leakage scoring
+    if (this.x >= CFG.SIM_W * CFG.BATT_X_FRAC) return; // defer to checkCollisions()
     // FIX MED-1: Ballistic missile ground impact — spawn explosion + log instead of silent death
     if (this.y > CFG.SIM_H + 5) {
       boom(this.x, CFG.SIM_H, 180, 100, 40, 12, this.type); // ground impact dust
@@ -773,7 +776,7 @@ class Drone extends Threat {
     this.vx = CFG.SPD_DRONE + random(-0.3, 0.3);
     this.vy = random(-0.25, 0.25);
   }
-  applyBoids(drones) {
+  applyBoids(drones, dt = 1) { // FIX MEDIUM-1: accept dt for frame-rate-independent boid forces
     let sx=0, sy=0, sc=0;    // separation
     let ax=0, ay=0, ac=0;    // alignment
     let cx=0, cy=0, cc=0;    // cohesion
@@ -785,9 +788,9 @@ class Drone extends Threat {
       if (d < CFG.BOID_ALIGN) { ax += o.vx; ay += o.vy; ac++; }
       if (d < CFG.BOID_COH)   { cx += o.x;  cy += o.y;  cc++; }
     }
-    if (sc > 0) { this.vx += (sx/sc)*0.09; this.vy += (sy/sc)*0.09; }
-    if (ac > 0) { this.vx += (ax/ac - this.vx)*0.04; this.vy += (ay/ac - this.vy)*0.04; }
-    if (cc > 0) { this.vx += ((cx/cc)-this.x)*0.002; this.vy += ((cy/cc)-this.y)*0.002; }
+    if (sc > 0) { this.vx += (sx/sc)*0.09*dt; this.vy += (sy/sc)*0.09*dt; } // FIX MEDIUM-1: scale by dt
+    if (ac > 0) { this.vx += (ax/ac - this.vx)*0.04*dt; this.vy += (ay/ac - this.vy)*0.04*dt; } // FIX MEDIUM-1: scale by dt
+    if (cc > 0) { this.vx += ((cx/cc)-this.x)*0.002*dt; this.vy += ((cy/cc)-this.y)*0.002*dt; } // FIX MEDIUM-1: scale by dt
     // Speed clamp: drones are slow
     const spd = sqrt(this.vx*this.vx + this.vy*this.vy);
     if (spd > CFG.SPD_DRONE * 1.6) {
@@ -802,8 +805,8 @@ class Drone extends Threat {
   }
   update(dt = 1, peers) { // FIX HIGH-2: accept dt for frame-rate-independent physics
     this.saveTrail();
-    this.vx = max(this.vx, 0.55); // always advance toward target
-    this.applyBoids(peers);
+    this.applyBoids(peers, dt); // FIX MEDIUM-2: pass dt to boids; floor applied after
+    this.vx = max(this.vx, 0.55); // FIX MEDIUM-2: enforce minimum advance speed AFTER boid corrections
     this.x += this.vx * dt; this.y += this.vy * dt;
     if (this.x > CFG.SIM_W+5 || this.y<-10 || this.y>CFG.SIM_H+10) this.alive=false;
   }
@@ -847,6 +850,8 @@ class Interceptor {
     this.color = this.tier.color;
     this.trailColor = this.tier.trailColor;
 
+    // FIX HIGH-1: Guard against null/undefined track to prevent TypeError on track.pos
+    if (!track) { this.alive = false; return; }
     const tp = track.pos;
     const tv = track.vel;
     const dx = tp.x - x;
