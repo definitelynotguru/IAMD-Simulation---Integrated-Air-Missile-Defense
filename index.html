@@ -166,6 +166,8 @@ const CFG = {
       killRadius: 30,
       engageAltMin: 0.35,
       engageAltMax: 0.0,
+      // engageAltMin/Max: altitude fraction (0=high altitude, 1=ground level) -- INVERSE of canvas Y
+      // engageYMinFrac/MaxFrac: canvas Y fraction (0=top of canvas, 1=bottom) -- used in rendering + logic
       engageYMinFrac: 0.00,
       engageYMaxFrac: 0.35,
       preferredThreats: ['ballistic', 'hypersonic'],
@@ -183,8 +185,10 @@ const CFG = {
       magazine: 12,
       killRadius: 24,
       engageAltMin: 0.65,
-      engageAltMax: 0.25,
-      engageYMinFrac: 0.25,
+      engageAltMax: 0.35,
+      // engageAltMin/Max: altitude fraction (0=high altitude, 1=ground level) -- INVERSE of canvas Y
+      // engageYMinFrac/MaxFrac: canvas Y fraction (0=top of canvas, 1=bottom) -- used in rendering + logic
+      engageYMinFrac: 0.35,
       engageYMaxFrac: 0.65,
       preferredThreats: ['cruise', 'ballistic', 'hypersonic'],
     },
@@ -201,8 +205,10 @@ const CFG = {
       magazine: 18,
       killRadius: 18,
       engageAltMin: 1.0,
-      engageAltMax: 0.55,
-      engageYMinFrac: 0.55,
+      engageAltMax: 0.65,
+      // engageAltMin/Max: altitude fraction (0=high altitude, 1=ground level) -- INVERSE of canvas Y
+      // engageYMinFrac/MaxFrac: canvas Y fraction (0=top of canvas, 1=bottom) -- used in rendering + logic
+      engageYMinFrac: 0.65,
       engageYMaxFrac: 1.00,
       preferredThreats: ['drone', 'cruise'],
     },
@@ -1131,15 +1137,17 @@ function runC2() {
 
     // Find best tier: prefer one whose preferredThreats includes this threat type
     let tierKey = CFG.TIER_ORDER[desiredIndex];
-    // If current tier doesn't prefer this threat type, search for a better match
+    // FIX M-2: Search ALL tiers (not just downward) and pick the closest preferred match
     if (!isThreatPreferred(tierKey, threat.type)) {
-      for (let ti = desiredIndex; ti < CFG.TIER_ORDER.length; ti++) {
+      let bestTi = -1, bestDist = Infinity;
+      for (let ti = 0; ti < CFG.TIER_ORDER.length; ti++) {
         const candidate = CFG.TIER_ORDER[ti];
         if (isThreatPreferred(candidate, threat.type) && score.magazines[candidate] > 0) {
-          tierKey = candidate;
-          break;
+          const dist = Math.abs(ti - desiredIndex);
+          if (dist < bestDist) { bestDist = dist; bestTi = ti; }
         }
       }
+      if (bestTi >= 0) tierKey = CFG.TIER_ORDER[bestTi];
     }
     if (score.magazines[tierKey] <= 0) continue;
     candidates.push({ id, kf, threat, estSpeed, isHypersonic, tierKey, isReengage: assessment.currentTierIndex !== null });
