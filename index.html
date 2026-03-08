@@ -249,7 +249,6 @@ const CFG = {
     },
   },
   TIER_ORDER: ['UPPER', 'MIDDLE', 'LOWER'],
-  ASSESS_DELAY: 15,           // frames for SLS look phase before re-engaging down a layer
   SLS_ASSESS_DELAY: 15,       // alias — frames to wait after intercept attempt
 
   // Threat speeds (px/frame — faster = harder to intercept)
@@ -340,6 +339,7 @@ class KF1D {
     // FIX v2.1-H2: Floor covariance to 1e-6 to enforce positive-definiteness
     this.Pp = max(this.Pp, 1e-6);
     this.Pv = max(this.Pv, 1e-6);
+    this.Pxv = Math.max(-Math.sqrt(this.Pp * this.Pv), Math.min(this.Pxv, Math.sqrt(this.Pp * this.Pv)));
   }
 }
 
@@ -1566,7 +1566,7 @@ function drawPanel() {
   stroke(0, 120, 40, 100); strokeWeight(1); line(CFG.SIM_W, 0, CFG.SIM_W, CFG.H);
 
   fill(0, 255, 65); noStroke(); textSize(11); textAlign(LEFT);
-  text('LAYERED IAMD COMMAND v2.2', px, 22);
+  text('LAYERED IAMD COMMAND v2.3.1', px, 22);
   fill(0, 120, 50); textSize(8);
   text('SLS TIERED INTERCEPT DISPLAY', px, 33);
   stroke(0, 90, 35); line(px, 37, CFG.W-8, 37);
@@ -1729,6 +1729,7 @@ function drawPanel() {
 
 // ── GAME OVER OVERLAY ─────────────────────────────────────────────────────────
 function drawGameOver() {
+  push();
   fill(0, 0, 0, 190); noStroke(); rect(0, 0, CFG.SIM_W, CFG.SIM_H);
   fill(255, 50, 50); textSize(34); textAlign(CENTER, CENTER);
   text('DEFENSE FAILED', CFG.SIM_W/2, CFG.SIM_H/2 - 38);
@@ -1738,7 +1739,7 @@ function drawGameOver() {
   text(`Final kill rate: ${score.kills + score.leak > 0 ? floor(score.kills/(score.kills+score.leak)*100) : 100}%   Shots fired: ${score.shots}`, CFG.SIM_W/2, CFG.SIM_H/2 + 24);
   fill(0, 200, 100); textSize(12);
   text('Press [R] to restart', CFG.SIM_W/2, CFG.SIM_H/2 + 52);
-  textAlign(LEFT);
+  pop();
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
@@ -1775,6 +1776,7 @@ function initGame() {
   gameOver    = false;
   lastWave    = millis();
   lastC2Frame = 0;
+  lastFrameTime = 0;
   addLog('SYSTEM NOMINAL - AWAITING THREATS');
   addLog('LAYERED DEFENSE BATTERY ONLINE');
 }
