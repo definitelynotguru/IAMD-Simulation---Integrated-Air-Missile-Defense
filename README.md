@@ -12,7 +12,7 @@
 ---
 
 <!-- HERO GIF PLACEHOLDER - record with LICEcap or ShareX and replace below -->
-![IAMD Simulation Demo](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNDM1MHNvZHR5NnZsOHgzNjZ3azA1M3Q2cmFzbWxsOGM2amxsNml0YSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/7oXHjHjxaj5FwTj08p/giphy.gif)
+![IAMD Simulation Demo](https://media.discordapp.net/attachments/692810348650299533/1480192508096151662/brave_nlkn4ivOvf.gif?ex=69aec832&is=69ad76b2&hm=ac36c3502af21af820e5c514768eb3e5e3ddd51764f1a6df42cd9fdaa9e9a4ef&=&width=974&height=552)
 <!-- Suggested recording: ~20s clip showing tiered interceptors engaging a mixed threat wave -->
 
 ---
