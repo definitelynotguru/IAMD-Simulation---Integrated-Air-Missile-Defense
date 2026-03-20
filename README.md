@@ -168,7 +168,7 @@ Three GitHub Actions workflows run on push:
 
 ## License
 
-MIT - do whatever you want, just don't blame me if it doesn't actually shoot down real missiles.
+MIT - do whatever you want, just don't blame me if it doesn't actually shoot down real missiles. 😭
 
 ---
 
